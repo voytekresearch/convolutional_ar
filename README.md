@@ -1,13 +1,12 @@
 # Autoregressive Models for Texture Images
 
-
 ## Convolutional AR Model
 
 Rotaion invariant simultaneous autoregressive and circlular autoregressive (AR)
 models are described in Jianchang and Anil 1994. These models were extended
 in to a convolutional like framework to make weights translation invariant.
 
-![car](https://github.com/ryanhammonds/test/blob/6a6e89600cc655f4303ed25da8ae0bad0ebf527e/docs/car.png)
+![car](https://github.com/voytekresearch/convolutional_ar/blob/3443b828577c830e4c27d640cc0981f6310c489f/docs/car.png)
 
 A set of AR weights (w) are learned for each circle such that wx = y, where x are
 values of past pixels and the y is the current pixel along the circle. The same
@@ -40,13 +39,13 @@ expected to decrease.
 
 Log PSD comparisons between classes:
 
-![PSD](https://github.com/ryanhammonds/test/blob/a4fe60d982e12a3ddd9cd92a915d5a953526ae19/docs/psd.png)
+![PSD](https://github.com/voytekresearch/convolutional_ar/blob/3443b828577c830e4c27d640cc0981f6310c489f/docs/psd.png)
 
 ## Datasets
 
 Kylberg textures. Examples of each class:
 
-![kylberg](https://github.com/ryanhammonds/test/blob/6a6e89600cc655f4303ed25da8ae0bad0ebf527e/docs/example_x.png)
+![kylberg](https://github.com/voytekresearch/convolutional_ar/blob/3443b828577c830e4c27d640cc0981f6310c489f/docs/example_x.png)
 
 These stochastic / semi-random patterns can be learned as autoregressive coefficients.
 
