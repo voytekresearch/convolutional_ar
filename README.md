@@ -52,7 +52,7 @@ These stochastic / semi-random patterns can be learned as autoregressive coeffic
 ## Results
 
 A SVM found 87% accuracy for and 80:20 train test split. This is promising since chance
-is 0.035%, since there are 28 classes. State of the art convolution networks have used
+is 3.6%, since there are 28 classes. State of the art convolution networks have used
 this dataset and found ~97% accuracy.
 
 Improved tuning and cross-validation is needed. To be updated.
