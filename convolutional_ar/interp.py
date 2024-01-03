@@ -1,12 +1,13 @@
 """Interpolation."""
 
+import warnings
 import numpy as np
 from numba import jit, prange
+from scipy import interpolate
 
-
-@jit(nopython=True, fastmath=True, nogil=True, cache=True, parallel=True)
 def interpolate_circle(
-    img: np.ndarray, n_points: int, radius: float, center: float
+    img: np.ndarray, n_points: int, radius: int, spacing: int,
+    method: str='cubic'
 ) -> (np.ndarray, np.ndarray, np.ndarray):
     """Interpolate a circular path around a center point
 
@@ -16,10 +17,10 @@ def interpolate_circle(
         Values (grayscale) of the image.
     n_points : int
         Number of points to interpolate.
-    radius : float
-        Radius of the circle.
-    center : float
-        Center of the circle.
+    radius : int
+        Radius of the circle, in pixels.
+    spacing : int
+        Spacing between cicles, in pixels.
 
     Returns
     -------
@@ -30,26 +31,49 @@ def interpolate_circle(
     interp_vals : 1d array
         Interpolated values.
     """
-    # Generate theta values evenly spaced between 0 and 2*pi
-    theta_values = np.linspace(0, 2 * np.pi, n_points)
+    # Center points
+    iy = np.arange(radius, len(img[0])-radius, spacing)
+    ix = np.arange(radius, len(img)-radius, spacing)
+    centers = np.array(np.meshgrid(iy, ix, copy=False)).T.reshape(-1, 2)
 
-    # Calculate the corresponding x and y values
+    # Circle
+    theta_values = np.linspace(0, 2*np.pi, n_points)
+
     x_circle = np.cos(theta_values)
     y_circle = np.sin(theta_values)
 
-    # Normalize to d=1 and c=0
     x_circle = x_circle - x_circle.min()
     x_circle = (x_circle / x_circle.max()) - 0.5
 
     y_circle = y_circle - y_circle.min()
     y_circle = (y_circle / y_circle.max()) - 0.5
 
-    # Rescale circle to size radius
-    x2 = (x_circle * (radius * 2)) + center[0]
-    y2 = (y_circle * (radius * 2)) + center[1]
+    x_circle = x_circle * (radius * 2)
+    y_circle = y_circle * (radius * 2)
+
+    x2 = (x_circle + centers[:, 0][:, None])
+    y2 = (y_circle + centers[:, 1][:, None])
 
     # Interpolate
-    interp_vals = np.diag(bilinear_interpolation(img, x2, y2))
+    if method == 'bilinear':
+
+        interp_vals = np.zeros((len(x2), n_points))
+        for i, (x, y) in enumerate(zip(x2, y2)):
+            interp_vals[i] = np.diag(bilinear_interpolation(img, x, y))
+
+    elif method == 'cubic':
+        x = np.arange(0, len(img[0]))
+        y = np.arange(0, len(img))
+
+        interp_vals = np.zeros((len(x2), n_points))
+        interp = interpolate.RegularGridInterpolator((x, y), img, method='cubic')
+
+        for i, (x_re, y_re) in enumerate(zip(x2, y2)):
+            interp_vals[i] = interp((x_re, y_re))
+
+    interp_vals = interp_vals.reshape(-1, n_points)
+    x2 = x2.reshape(-1, n_points)
+    y2 = y2.reshape(-1, n_points)
 
     return x2, y2, interp_vals
 
@@ -111,10 +135,10 @@ def bilinear_interpolation(
             f22 = img[idy, idx]
 
             img_out[j, i] = (
-                f11 * (x2 - x) * (y2 - y)
-                + f21 * (x - x1) * (y2 - y)
-                + f12 * (x2 - x) * (y - y1)
-                + f22 * (x - x1) * (y - y1)
+                f11 * (x2 - x) * (y2 - y) +
+                f21 * (x - x1) * (y2 - y) +
+                f12 * (x2 - x) * (y - y1) +
+                f22 * (x - x1) * (y - y1)
             ) / ((x2 - x1) * (y2 - y1))
 
     return img_out
