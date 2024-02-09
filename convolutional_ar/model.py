@@ -1,3 +1,5 @@
+"""Convolutional Autoregressive Model."""
+
 import sys
 from typing import Callable, Optional
 import torch
@@ -14,8 +16,17 @@ class ConvolutionalAR:
         Learned weights as the unique of the weight matrix, sorted by distance.
     """
 
-    def __init__(self, window_size: int, loss_fn: Optional[Callable]=None, loss_thresh: Optional[float]=None, optim: Optional[type]=None,
-                 lr: Optional[float]=1e-3, n_epochs: Optional[int]=1000, adaptive_weights: Optional[bool]=False, verbose: Optional[int]=10):
+    def __init__(
+        self,
+        window_size: int,
+        loss_fn: Optional[Callable] = None,
+        loss_thresh: Optional[float] = None,
+        optim: Optional[type] = None,
+        lr: Optional[float] = 1e-3,
+        n_epochs: Optional[int] = 1000,
+        adaptive_weights: Optional[bool] = False,
+        verbose: Optional[int] = 10,
+    ):
         """Initialize.
 
         Parameters
@@ -29,7 +40,7 @@ class ConvolutionalAR:
         self.window_size = window_size
         if window_size % 2 != 1:
             raise ValueError("window_size should be odd.")
-        self.ctr = (self.window_size-1)//2
+        self.ctr = (self.window_size - 1) // 2
 
         # Optimization
         self.lr = lr
@@ -47,8 +58,12 @@ class ConvolutionalAR:
         self.weight_matrix_ = None
         self.weight_vector_ = None
 
-
-    def fit(self, X: torch.tensor, y: Optional[torch.tensor]=None, progress: Optional[Callable]=None):
+    def fit(
+        self,
+        X: torch.tensor,
+        y: Optional[torch.tensor] = None,
+        progress: Optional[Callable] = None,
+    ):
         """Fit image(s).
 
         Parameters
@@ -74,66 +89,88 @@ class ConvolutionalAR:
         else:
             iterable = progress(range(len(X)))
 
-        model = SolveConvolutionalAR(self.window_size)
+        self.model = SolveConvolutionalAR(self.window_size)
 
         for i_x in iterable:
-
             # Todo: multiprocessing for this loop
 
             # Sliding window view
-            x_windowed = X[i_x].unfold(0, self.window_size, 1).unfold(1, self.window_size, 1)
+            x_windowed = (
+                X[i_x].unfold(0, self.window_size, 1).unfold(1, self.window_size, 1)
+            )
             x_windowed = x_windowed.reshape(-1, self.window_size, self.window_size)
 
             # Target values (center of windows)
             y_ctr = x_windowed[:, self.ctr, self.ctr].reshape(-1, 1)
 
             # Reset weights
-            if i_x != 0 and (not self.adaptive_weights or last_label != y[i_x]):
-                 model.reset_weights()
+            if (
+                i_x != 0
+                and not self.adaptive_weights
+                and (last_label is None or last_label != y[i_x])
+            ):
+                self.model.reset_weights()
 
             # Initialize optimizer
-            optim = self.optim(model.parameters(), lr=self.lr)
+            optim = self.optim(self.model.parameters(), lr=self.lr)
 
             # Descent
             for i_epoch in range(self.n_epochs):
-
-                y_pred = model(x_windowed)
+                y_pred = self.model(x_windowed)
 
                 loss = self.loss_fn(y_pred, y_ctr)
                 loss.backward()
 
                 optim.step()
+                optim.zero_grad()
 
                 # Reporting
-                if i_epoch < self.n_epochs - 1:
-                    # Save gradient after last backward
-                    optim.zero_grad()
-
-                if self.verbose is not None and (i_epoch % self.verbose == 0 or i_epoch == self.n_epochs-1):
+                if self.verbose is not None and (
+                    i_epoch % self.verbose == 0 or i_epoch == self.n_epochs - 1
+                ):
                     # Print progress
-                    sys.stdout.write(f'\rmodel {i_x}, epoch {i_epoch}, loss {float(loss)}')
+                    sys.stdout.write(
+                        f"\rmodel {i_x}, epoch {i_epoch}, loss {float(loss)}"
+                    )
                     sys.stdout.flush()
 
                 if float(loss) < self.loss_thresh:
                     # Exit loop when loss is below threshold
                     if self.verbose is not None:
-                        sys.stdout.write(f'\rmodel {i_x}, epoch {i_epoch}, loss {float(loss)}')
+                        sys.stdout.write(
+                            f"\rmodel {i_x}, epoch {i_epoch}, loss {float(loss)}"
+                        )
                         print("")
                     break
 
+                if self.verbose and i_epoch == self.n_epochs - 1:
+                    print("")
+
             # Get weights out of model
-            self.weight_matrix_[i_x] = model.weight_matrix.detach().clone() * model.weight_scale
+            self.weight_matrix_[i_x] = (
+                self.model.weight_matrix.detach().clone() * self.model.weight_scale
+            )
 
             last_label = y[i_x] if y is not None else None
 
         # Get weight vectors from weight matrix using masks
-        self.weight_vector_ = torch.zeros((len(model.unique_distances)))
+        self.weight_vector_ = torch.zeros((len(X), self.model.n_unique))
+        for i_x in range(len(X)):
+            for i_m in range(len(self.model.masks)):
+                self.weight_vector_[i_x] = self.weight_matrix_[i_x][
+                    self.model.masks[i_m]
+                ][0]
 
 
 class SolveConvolutionalAR(torch.nn.Module):
     """Torch model."""
 
-    def __init__(self, window_size: int, weight_vector: Optional[torch.tensor]=None, weight_matrix: Optional[torch.tensor]=None):
+    def __init__(
+        self,
+        window_size: int,
+        weight_vector: Optional[torch.tensor] = None,
+        weight_matrix: Optional[torch.tensor] = None,
+    ):
         """
         Parameters
         ----------
@@ -167,8 +204,9 @@ class SolveConvolutionalAR(torch.nn.Module):
         # A faster algorithm for this exists
         self.distances = torch.hypot(
             *torch.meshgrid(
-                torch.arange(self.window_size) - ((self.window_size-1)/2),
-                torch.arange(self.window_size) - ((self.window_size-1)/2))
+                torch.arange(self.window_size) - ((self.window_size - 1) / 2),
+                torch.arange(self.window_size) - ((self.window_size - 1) / 2),
+            )
         )
 
         # Sort distances from center
@@ -183,7 +221,9 @@ class SolveConvolutionalAR(torch.nn.Module):
 
         # Masks that map to distance group
         #   (e.g. all pixels with distance from center == i)
-        self.masks = torch.zeros((len(self.unique_distances), window_size, window_size), dtype=bool)
+        self.masks = torch.zeros(
+            (len(self.unique_distances), window_size, window_size), dtype=bool
+        )
         for i, d in enumerate(self.unique_distances):
             mask = self.distances == d
             self.masks[i] = mask
@@ -191,7 +231,7 @@ class SolveConvolutionalAR(torch.nn.Module):
         # Inital weights
         if weight_vector == None:
             self._random_weights = True
-            self.weight_vector = torch.exp(-self.unique_distances.clone() / .5) * 5
+            self.weight_vector = torch.exp(-self.unique_distances.clone() / 0.5) * 5
         else:
             self.weight_vector = weight_vector
 
@@ -201,7 +241,7 @@ class SolveConvolutionalAR(torch.nn.Module):
         self.weight_scale = torch.zeros((window_size, window_size))
         for i in range(self.n_unique):
             # Scale with 1 / number of points at same distance from center of kernel
-            self.weight_scale[self.masks[i]] = 1/self.counts[i]
+            self.weight_scale[self.masks[i]] = 1 / self.counts[i]
 
         # Create a matrix of weights
         if weight_matrix is not None:
@@ -217,7 +257,7 @@ class SolveConvolutionalAR(torch.nn.Module):
 
         # Ensure gradients are fixed at equal distances from center
         self.weight_matrix.register_hook(
-            lambda grad : self.equalize_grad(grad, self.masks)
+            lambda grad: self.equalize_grad(grad, self.masks)
         )
 
         self._weight_matrix_orig = self.weight_matrix.clone()
@@ -267,4 +307,6 @@ class SolveConvolutionalAR(torch.nn.Module):
         x : 3d torch.tensor
             Windowed image with shape [n_windows, window_size, window_size].
         """
-        return (x.reshape(len(x), -1) @ (self.weight_matrix.view(-1, 1) * self.weight_scale.view(-1, 1)))
+        return x.reshape(len(x), -1) @ (
+            self.weight_matrix.view(-1, 1) * self.weight_scale.view(-1, 1)
+        )
