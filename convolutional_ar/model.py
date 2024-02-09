@@ -3,49 +3,64 @@
 import sys
 from typing import Callable, Optional
 import torch
-
+import numpy as np
 
 class ConvolutionalAR:
     """Convolutional Autoregressive Model.
 
     Attributes
     ----------
-    weight_matrix_ : 2d tensor
+    weight_matrix_ : 3d tensor
         Learned weights in matrix form (e.g. with duplicates).
-    weight_vector_ : 1d tensor
+    weight_vector_ : 2d tensor
         Learned weights as the unique of the weight matrix, sorted by distance.
     """
 
     def __init__(
         self,
-        window_size: int,
+        radius: int,
         loss_fn: Optional[Callable] = None,
         loss_thresh: Optional[float] = None,
         optim: Optional[type] = None,
         lr: Optional[float] = 1e-3,
         n_epochs: Optional[int] = 1000,
-        adaptive_weights: Optional[bool] = False,
+        adaptive_weights: Optional[int] = None,
         verbose: Optional[int] = 10,
     ):
         """Initialize.
 
         Parameters
         ----------
-        window_size : int
-            Size of window length that is to be convolved. Must be odd so that
-            there is a single center pixel.
+        radius : int
+            Size of window from the center pixel.
         loss_fn : func, optional, default: None
+            Loss function, e.g. torch.nn.MSELoss().
+        loss_thresh : float, optional, default: None
+            Loss threshold to exit optimization loop.
+        optim : type : optional, default: None
+            Unitialized optimizer, e.g. torch.optim.Adam.
+        lr : float, optional, default: 1e-3
+            Learning rate.
+        n_epochs : int, optional, default: 1000
+            Number of epochs.
+        adaptive_weights : int, optional, default: None
+            Starts next iteration with weigts from the last if not None.
+            The int specifices the number of additional iterations to
+            continue afer loss_thresh has been met to prevent immediately
+            exiting optimization.
+        verbose : int, optional, default: 10
+            Number of epochs between loss reports.
         """
         # Window
-        self.window_size = window_size
-        if window_size % 2 != 1:
+        self.radius = radius
+        self.window_size = int(2 * self.radius + 1)
+        if self.window_size % 2 != 1:
             raise ValueError("window_size should be odd.")
         self.ctr = (self.window_size - 1) // 2
 
         # Optimization
         self.lr = lr
         self.adaptive_weights = adaptive_weights
-        self._last_label = None
         self.n_epochs = n_epochs
 
         self.loss_fn = torch.nn.MSELoss() if loss_fn is None else loss_fn
@@ -91,8 +106,9 @@ class ConvolutionalAR:
 
         self.model = SolveConvolutionalAR(self.window_size)
 
+        last_label = None
+
         for i_x in iterable:
-            # Todo: multiprocessing for this loop
 
             # Sliding window view
             x_windowed = (
@@ -106,17 +122,31 @@ class ConvolutionalAR:
             # Reset weights
             if (
                 i_x != 0
-                and not self.adaptive_weights
-                and (last_label is None or last_label != y[i_x])
+                and self.adaptive_weights is None
+                or (last_label is None or last_label != y[i_x])
             ):
                 self.model.reset_weights()
 
             # Initialize optimizer
             optim = self.optim(self.model.parameters(), lr=self.lr)
 
+            # Number of times after the adaptive threshold has been met to continue
+            n_after = 0
+
             # Descent
             for i_epoch in range(self.n_epochs):
+
                 y_pred = self.model(x_windowed)
+
+                # _y_pred = y_pred.detach().clone().numpy()
+                # np.save(f'/Users/ryanhammonds/projects/convolutional_ar/predicted_images/img_{str(i_epoch).zfill(4)}.npz',
+                #         _y_pred
+                # )
+
+                # wm = self.model.weight_matrix.detach().clone().numpy()
+                # np.save(f'/Users/ryanhammonds/projects/convolutional_ar/predicted_images/w_{str(i_epoch).zfill(4)}.npz',
+                #         wm
+                # )
 
                 loss = self.loss_fn(y_pred, y_ctr)
                 loss.backward()
@@ -135,7 +165,10 @@ class ConvolutionalAR:
                     sys.stdout.flush()
 
                 if float(loss) < self.loss_thresh:
-                    # Exit loop when loss is below threshold
+                    n_after += 1
+
+                if n_after == self.adaptive_weights or (self.adaptive_weights is None and n_after == 1):
+                    # Exit loop when loss is below threshold after n iterations
                     if self.verbose is not None:
                         sys.stdout.write(
                             f"\rmodel {i_x}, epoch {i_epoch}, loss {float(loss)}"
@@ -156,11 +189,12 @@ class ConvolutionalAR:
         # Get weight vectors from weight matrix using masks
         self.weight_vector_ = torch.zeros((len(X), self.model.n_unique))
         for i_x in range(len(X)):
-            for i_m in range(len(self.model.masks)):
-                self.weight_vector_[i_x] = self.weight_matrix_[i_x][
+            for i_m in range(self.model.n_unique):
+                self.weight_vector_[i_x][i_m] = self.weight_matrix_[i_x][
                     self.model.masks[i_m]
                 ][0]
 
+        self.y_pred = y_pred
 
 class SolveConvolutionalAR(torch.nn.Module):
     """Torch model."""
@@ -206,6 +240,7 @@ class SolveConvolutionalAR(torch.nn.Module):
             *torch.meshgrid(
                 torch.arange(self.window_size) - ((self.window_size - 1) / 2),
                 torch.arange(self.window_size) - ((self.window_size - 1) / 2),
+                indexing="ij"
             )
         )
 
@@ -231,7 +266,9 @@ class SolveConvolutionalAR(torch.nn.Module):
         # Inital weights
         if weight_vector == None:
             self._random_weights = True
-            self.weight_vector = torch.exp(-self.unique_distances.clone() / 0.5) * 5
+            #self.weight_vector = torch.exp(-self.unique_distances.clone() / 0.5)
+            self.weight_vector = torch.rand(self.n_unique) #/ 100
+            #self.weight_vector = torch.exp(torch.randn(self.n_unique))
         else:
             self.weight_vector = weight_vector
 
@@ -257,7 +294,7 @@ class SolveConvolutionalAR(torch.nn.Module):
 
         # Ensure gradients are fixed at equal distances from center
         self.weight_matrix.register_hook(
-            lambda grad: self.equalize_grad(grad, self.masks)
+           lambda grad: self.equalize_grad(grad, self.masks)
         )
 
         self._weight_matrix_orig = self.weight_matrix.clone()
@@ -287,7 +324,7 @@ class SolveConvolutionalAR(torch.nn.Module):
         -----
         Given the following weight matrix:
 
-        weight_matix = torch.tensor([
+        weight_matrix = torch.tensor([
                     [w1, w0, w1],
                     [w0,  0, w0],
                     [w1, w0, w1]
@@ -307,6 +344,6 @@ class SolveConvolutionalAR(torch.nn.Module):
         x : 3d torch.tensor
             Windowed image with shape [n_windows, window_size, window_size].
         """
-        return x.reshape(len(x), -1) @ (
+        return x.view(len(x), -1) @ (
             self.weight_matrix.view(-1, 1) * self.weight_scale.view(-1, 1)
         )
