@@ -24,7 +24,6 @@ class ConvolutionalAR:
         optim: Optional[type] = None,
         lr: Optional[float] = 1e-3,
         n_epochs: Optional[int] = 1000,
-        adaptive_weights: Optional[int] = None,
         verbose: Optional[int] = 10,
         init_weight_matrix: Optional[torch.tensor]=None
     ):
@@ -44,11 +43,6 @@ class ConvolutionalAR:
             Learning rate.
         n_epochs : int, optional, default: 1000
             Number of epochs.
-        adaptive_weights : int, optional, default: None
-            Starts next iteration with weigts from the last if not None.
-            The int specifices the number of additional iterations to
-            continue afer loss_thresh has been met to prevent immediately
-            exiting optimization.
         verbose : int, optional, default: 10
             Number of epochs between loss reports.
         init_weight_matrix : torch.tensor, optional, default: None
@@ -63,7 +57,6 @@ class ConvolutionalAR:
 
         # Optimization
         self.lr = lr
-        self.adaptive_weights = adaptive_weights
         self.n_epochs = n_epochs
 
         self.loss_fn = torch.nn.MSELoss() if loss_fn is None else loss_fn
@@ -80,7 +73,6 @@ class ConvolutionalAR:
     def fit(
         self,
         X: torch.tensor,
-        y: Optional[torch.tensor] = None,
         progress: Optional[Callable] = None,
     ):
         """Fit image(s).
@@ -90,9 +82,6 @@ class ConvolutionalAR:
         X : 2d or 3d tensor
             Greyscale image data. Should have shape of either:
             (n_observations, pixel_rows, pixel_columns) or (pixel_rows, pixel_columns)
-        y : 1d tensor
-            Only needed if adapative_weights is True and X is 3d. These are binary labels.
-            Used to initialize weights within groups adaptively for faster convergence.
         progress : func
             Wraps iterations over X, typically with tqdm.tqdm or tqdm.notebook.tqdm.
         """
@@ -110,8 +99,6 @@ class ConvolutionalAR:
 
         self.model = SolveConvolutionalAR(self.window_size, weight_matrix=self._init_weight_matrix)
 
-        last_label = None
-
         for i_x in iterable:
 
             # Sliding window view
@@ -124,33 +111,16 @@ class ConvolutionalAR:
             y_ctr = x_windowed[:, self.ctr, self.ctr].reshape(-1, 1)
 
             # Reset weights
-            if (
-                i_x != 0
-                and self.adaptive_weights is None
-                or (last_label is None or last_label != y[i_x])
-            ):
+            if i_x != 0:
                 self.model.reset_weights()
 
             # Initialize optimizer
             optim = self.optim(self.model.parameters(), lr=self.lr)
 
-            # Number of times after the adaptive threshold has been met to continue
-            n_after = 0
-
             # Descent
             for i_epoch in range(self.n_epochs):
 
                 y_pred = self.model(x_windowed)
-
-                # _y_pred = y_pred.detach().clone().numpy()
-                # np.save(f'/Users/ryanhammonds/projects/convolutional_ar/predicted_images/img_{str(i_epoch).zfill(4)}.npz',
-                #         _y_pred
-                # )
-
-                # wm = self.model.weight_matrix.detach().clone().numpy()
-                # np.save(f'/Users/ryanhammonds/projects/convolutional_ar/predicted_images/w_{str(i_epoch).zfill(4)}.npz',
-                #         wm
-                # )
 
                 loss = self.loss_fn(y_pred, y_ctr)
                 loss.backward()
@@ -159,7 +129,7 @@ class ConvolutionalAR:
                 optim.zero_grad()
 
                 # Reporting
-                if self.verbose is None and self.adaptive_weights is None:
+                if self.verbose is None:
                     continue
 
                 if self.verbose is not None and (
@@ -172,9 +142,6 @@ class ConvolutionalAR:
                     sys.stdout.flush()
 
                 if float(loss) < self.loss_thresh:
-                    n_after += 1
-
-                if n_after == self.adaptive_weights or (self.adaptive_weights is None and n_after == 1):
                     # Exit loop when loss is below threshold after n iterations
                     if self.verbose is not None:
                         sys.stdout.write(
@@ -190,8 +157,6 @@ class ConvolutionalAR:
             self.weight_matrix_[i_x] = (
                 self.model.weight_matrix.detach().clone() * self.model.weight_scale
             )
-
-            last_label = y[i_x] if y is not None else None
 
         # Get weight vectors from weight matrix using masks
         self.weight_vector_ = torch.zeros((len(X), self.model.n_unique))
@@ -272,10 +237,7 @@ class SolveConvolutionalAR(torch.nn.Module):
 
         # Inital weights
         if weight_vector == None:
-            self._random_weights = True
-            #self.weight_vector = torch.exp(-self.unique_distances.clone() / 0.5)
-            self.weight_vector = torch.rand(self.n_unique) #/ 100
-            #self.weight_vector = torch.exp(torch.randn(self.n_unique))
+            self.weight_vector = torch.rand(self.n_unique)
         else:
             self.weight_vector = weight_vector
 
