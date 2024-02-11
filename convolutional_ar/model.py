@@ -26,6 +26,7 @@ class ConvolutionalAR:
         n_epochs: Optional[int] = 1000,
         adaptive_weights: Optional[int] = None,
         verbose: Optional[int] = 10,
+        init_weight_matrix: Optional[torch.tensor]=None
     ):
         """Initialize.
 
@@ -50,6 +51,8 @@ class ConvolutionalAR:
             exiting optimization.
         verbose : int, optional, default: 10
             Number of epochs between loss reports.
+        init_weight_matrix : torch.tensor, optional, default: None
+            Initalize weight matrix. Useful for resuming optimization.
         """
         # Window
         self.radius = radius
@@ -70,6 +73,7 @@ class ConvolutionalAR:
         self.verbose = verbose
 
         # Results
+        self._init_weight_matrix = init_weight_matrix
         self.weight_matrix_ = None
         self.weight_vector_ = None
 
@@ -104,7 +108,7 @@ class ConvolutionalAR:
         else:
             iterable = progress(range(len(X)))
 
-        self.model = SolveConvolutionalAR(self.window_size)
+        self.model = SolveConvolutionalAR(self.window_size, weight_matrix=self._init_weight_matrix)
 
         last_label = None
 
@@ -155,6 +159,9 @@ class ConvolutionalAR:
                 optim.zero_grad()
 
                 # Reporting
+                if self.verbose is None and self.adaptive_weights is None:
+                    continue
+
                 if self.verbose is not None and (
                     i_epoch % self.verbose == 0 or i_epoch == self.n_epochs - 1
                 ):
@@ -347,3 +354,13 @@ class SolveConvolutionalAR(torch.nn.Module):
         return x.view(len(x), -1) @ (
             self.weight_matrix.view(-1, 1) * self.weight_scale.view(-1, 1)
         )
+
+
+def vector_to_matrix(weight_vector, masks):
+
+    weight_matrix = torch.zeros(*masks[0].shape)
+
+    for i_m in range(len(weight_vector)):
+        weight_matrix[masks[i_m]] = weight_vector[i_m]
+
+    return weight_matrix
