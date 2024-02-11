@@ -1,45 +1,14 @@
 # Autoregressive Models for Texture Images
 
-## Convolutional AR Model
+# Convolutional Autoregressive Model
 
-Rotaion invariant simultaneous autoregressive and circlular autoregressive (AR)
-models are described in Jianchang and Anil 1994. These models were extended
-in to a convolutional like framework to make weights translation invariant.
+<img src="https://raw.githubusercontent.com/ryanhammonds/explorations/master/docs/convolution.png" width="500" style="width: 50%; display: block; margin-left: auto; margin-right: auto;"/>
 
-![car](https://github.com/voytekresearch/convolutional_ar/blob/3443b828577c830e4c27d640cc0981f6310c489f/docs/car.png)
+The weights of a convolution kernel are optimized to best predict the center pixel of each window, $\mathbf{X}_i$. The weights of the kernel (Fig. 2b) are linked based on distance from the center, e.g. the first three weights, $\{w_0, w_1, w_2\}$, correspond to indices in the kernel with distances $\{1, \sqrt{2}, 2\}$ from the center pixel. Convolution is the Frobenius inner product between the image and kernel, optimized to best predict the center pixel, $c_i \in \mathbf{X}$.
 
-A set of AR weights (w) are learned for each circle such that wx = y, where x are
-values of past pixels and the y is the current pixel along the circle. The same
-weights are applied to every cicle in the image such that one set of
-weights is learned. Here we used an order of 20, so 20 weights are learned per image.
+<img src="https://raw.githubusercontent.com/ryanhammonds/explorations/master/docs/decimation.png" width="600" style="width: 50%; display: block; margin-left: auto; margin-right: auto;"/>
 
-Circles are used to ensure rotational invaraince (e.g. the same result regardless)
-of rotations of the image. The convolution of the cicular kernel ensures that the
-weights are translation invariant. Scaling invariance is still an open question
-of how to solve. This could involve using various size radii for the circle per
-image to account for scaling difference.
-
-Since the circles are distinct, standard AR solutions (e.g. Burg's method) can not
-be used since there is an assumption of continuity. The analogy in the time domain
-is that Burg's method can not be used to learn a common set of weights for distinct
-signals. Instead, a simple neural network is used to learn the AR weights
-simulataneously.
-
-## Power Spectral Density
-
-Given AR coeffiecients, power spectral density (PSD) may be computed per image.
-The advantage of this is that the PSD is not effected by rotations or
-translations, like the 2d FFT is.
-
-Spectral parameterization has not yet been used. If a classification model
-performed poorly on log power, parameters extracted will not improve
-performance. Since decent accuracy was found here, spatial scales (e.g. image
-analog of timescales) may be extract as a secondary analysis, but performance is
-expected to decrease.
-
-Log PSD comparisons between classes:
-
-![PSD](https://github.com/voytekresearch/convolutional_ar/blob/3443b828577c830e4c27d640cc0981f6310c489f/docs/psd.png)
+Multiple convolution kernels are learned to account for various spatial scales in image. This is performed by decimating the image by various factors using the same kernel size, resulting in the kernel expanding by the decimation factor. The above image demonstrates this. Decimating the image by a factor of two results in the kernel expanding as shown in c.
 
 ## Datasets
 
@@ -47,15 +16,10 @@ Kylberg textures. Examples of each class:
 
 ![kylberg](https://github.com/voytekresearch/convolutional_ar/blob/3443b828577c830e4c27d640cc0981f6310c489f/docs/example_x.png)
 
-These stochastic / semi-random patterns can be learned as autoregressive coefficients.
 
 ## Results
 
-A SVM found 87% accuracy for and 80:20 train test split. This is promising since chance
-is 3.6%, since there are 28 classes. State of the art convolution networks have used
-this dataset and found ~97% accuracy.
-
-Improved tuning and cross-validation is needed. To be updated.
+A SVM found 99% test accuracy.
 
 ### Citations
 
