@@ -2,10 +2,14 @@
 
 import sys
 from typing import Callable, Optional
-import torch
+
 import numpy as np
 
-class ConvolutionalAR:
+import torch
+from torch import nn
+
+
+class ConvAR:
     """Convolutional Autoregressive Model.
 
     Attributes
@@ -32,7 +36,8 @@ class ConvolutionalAR:
         Parameters
         ----------
         radius : int
-            Size of window from the center pixel.
+            Size of window from the center pixel, excluding the center pixel.
+            Windows length is (2 * radius) + 1
         loss_fn : func, optional, default: None
             Loss function, e.g. torch.nn.MSELoss().
         loss_thresh : float, optional, default: None
@@ -50,16 +55,14 @@ class ConvolutionalAR:
         """
         # Window
         self.radius = radius
-        self.window_size = int(2 * self.radius + 1)
-        if self.window_size % 2 != 1:
-            raise ValueError("window_size should be odd.")
+        self.window_size = int(2 * radius + 1)
         self.ctr = (self.window_size - 1) // 2
 
         # Optimization
         self.lr = lr
         self.n_epochs = n_epochs
 
-        self.loss_fn = torch.nn.MSELoss() if loss_fn is None else loss_fn
+        self.loss_fn = nn.MSELoss() if loss_fn is None else loss_fn
         self.loss_thresh = -torch.inf if loss_thresh is None else loss_thresh
         self.optim = torch.optim.Adam if optim is None else optim
 
@@ -83,7 +86,7 @@ class ConvolutionalAR:
             Greyscale image data. Should have shape of either:
             (n_observations, pixel_rows, pixel_columns) or (pixel_rows, pixel_columns)
         progress : func
-            Wraps iterations over X, typically with tqdm.tqdm or tqdm.notebook.tqdm.
+            Wraps iterations over X, typically a lambda with tqdm.tqdm or tqdm.notebook.tqdm.
         """
 
         if X.ndim == 2:
@@ -97,18 +100,12 @@ class ConvolutionalAR:
         else:
             iterable = progress(range(len(X)))
 
-        self.model = SolveConvolutionalAR(self.window_size, weight_matrix=self._init_weight_matrix)
+        self.model = ConvARBase(self.radius, weight_matrix=self._init_weight_matrix)
 
         for i_x in iterable:
 
-            # Sliding window view
-            x_windowed = (
-                X[i_x].unfold(0, self.window_size, 1).unfold(1, self.window_size, 1)
-            )
-            x_windowed = x_windowed.reshape(-1, self.window_size, self.window_size)
-
             # Target values (center of windows)
-            y_ctr = x_windowed[:, self.ctr, self.ctr].reshape(-1, 1)
+            y_ctr = X[i_x, self.radius:-self.radius, self.radius:-self.radius].reshape(-1, 1)
 
             # Reset weights
             if i_x != 0:
@@ -120,7 +117,7 @@ class ConvolutionalAR:
             # Descent
             for i_epoch in range(self.n_epochs):
 
-                y_pred = self.model(x_windowed)
+                y_pred = self.model(X[i_x])
 
                 loss = self.loss_fn(y_pred, y_ctr)
                 loss.backward()
@@ -168,22 +165,24 @@ class ConvolutionalAR:
 
         self.y_pred = y_pred
 
-class SolveConvolutionalAR(torch.nn.Module):
+class ConvARBase(nn.Module):
     """Torch model."""
 
     def __init__(
         self,
-        window_size: int,
+        radius: int,
         weight_vector: Optional[torch.tensor] = None,
         weight_matrix: Optional[torch.tensor] = None,
     ):
         """
         Parameters
         ----------
-        window_size : int
-            Size of window length. Total elements in window is: window_size**2.
+        radius : int
+            Size of window from the center pixel, excluding the center pixel.
+            Windows length is (2 * radius) + 1
         weight_vector : 1d tensor
-            Inital weights. Theses will be mapped into weight_matrix, e.g. for a 3x3 window:
+            Inital weights. Theses will be mapped into weight_matrix,
+            e.g. for a 3x3 window:
                 weight_vector = torch.tensor([w0, w])
                 weight_matix = torch.tensor([
                     [w1, w0, w1],
@@ -202,10 +201,8 @@ class SolveConvolutionalAR(torch.nn.Module):
         super().__init__()
 
         # Compute distances from center
-        if window_size % 2 != 1:
-            raise ValueError("window_size should be odd.")
-
-        self.window_size = window_size
+        self.radius = radius
+        self.window_size = int(2 * radius + 1)
 
         # A faster algorithm for this exists
         self.distances = torch.hypot(
@@ -229,7 +226,8 @@ class SolveConvolutionalAR(torch.nn.Module):
         # Masks that map to distance group
         #   (e.g. all pixels with distance from center == i)
         self.masks = torch.zeros(
-            (len(self.unique_distances), window_size, window_size), dtype=bool
+            (len(self.unique_distances), self.window_size, self.window_size),
+            dtype=bool
         )
         for i, d in enumerate(self.unique_distances):
             mask = self.distances == d
@@ -244,7 +242,7 @@ class SolveConvolutionalAR(torch.nn.Module):
         self._weight_vector_orig = self.weight_vector.clone()
 
         # Scale weights based on how many pixels map to distance i
-        self.weight_scale = torch.zeros((window_size, window_size))
+        self.weight_scale = torch.zeros((self.window_size, self.window_size))
         for i in range(self.n_unique):
             # Scale with 1 / number of points at same distance from center of kernel
             self.weight_scale[self.masks[i]] = 1 / self.counts[i]
@@ -259,7 +257,7 @@ class SolveConvolutionalAR(torch.nn.Module):
                 self.weight_matrix[self.masks[i]] = self.weight_vector[i]
 
         # Make differentiable
-        self.weight_matrix = torch.nn.Parameter(self.weight_matrix)
+        self.weight_matrix = nn.Parameter(self.weight_matrix)
 
         # Ensure gradients are fixed at equal distances from center
         self.weight_matrix.register_hook(
@@ -305,17 +303,19 @@ class SolveConvolutionalAR(torch.nn.Module):
             grad[m] = grad[m].mean()
         return grad
 
-    def forward(self, x: torch.tensor):
+    def forward(self, X: torch.tensor):
         """Define forward pass.
 
         Parameters
         ----------
-        x : 3d torch.tensor
-            Windowed image with shape [n_windows, window_size, window_size].
+        X : torch.Tensor
+            Image.
         """
-        return x.view(len(x), -1) @ (
-            self.weight_matrix.view(-1, 1) * self.weight_scale.view(-1, 1)
-        )
+        return torch.conv2d(
+            X.view(1, 1, *X.shape),
+            self.weight_matrix.view(1, 1, *self.weight_matrix.shape) * \
+                self.weight_scale.view(1, 1, *self.weight_scale.shape)
+        )[0, 0].view(-1, 1)
 
 
 def vector_to_matrix(weight_vector, masks):
