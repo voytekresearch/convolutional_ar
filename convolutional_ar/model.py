@@ -14,7 +14,7 @@ class ConvAR:
 
     Attributes
     ----------
-    weight_matrix_ : 3d tensor
+    weight_matrix_ : 2d or 3d tensor
         Learned weights in matrix form (e.g. with duplicates).
     weight_vector_ : 2d tensor
         Learned weights as the unique of the weight matrix, sorted by distance.
@@ -23,6 +23,7 @@ class ConvAR:
     def __init__(
         self,
         radius: int,
+        ndim: Optional[int] = 2,
         loss_fn: Optional[Callable] = None,
         loss_thresh: Optional[float] = None,
         optim: Optional[type] = None,
@@ -38,6 +39,8 @@ class ConvAR:
         radius : int
             Size of window from the center pixel, excluding the center pixel.
             Windows length is (2 * radius) + 1
+        ndim : int, optional, default: 2
+            Dimensionality of input. 2 for images. 3 for volumetric.
         loss_fn : func, optional, default: None
             Loss function, e.g. torch.nn.MSELoss().
         loss_thresh : float, optional, default: None
@@ -55,6 +58,7 @@ class ConvAR:
         """
         # Window
         self.radius = radius
+        self.ndim = ndim
         self.window_size = int(2 * radius + 1)
         self.ctr = (self.window_size - 1) // 2
 
@@ -82,17 +86,17 @@ class ConvAR:
 
         Parameters
         ----------
-        X : 2d or 3d tensor
+        X : 3d or 4d tensor
             Greyscale image data. Should have shape of either:
-            (n_observations, pixel_rows, pixel_columns) or (pixel_rows, pixel_columns)
+            (n_observations, voxels_i, voxels_j, voxels_k) or (voxels_i, voxels_j, voxels_k)
         progress : func
             Wraps iterations over X, typically a lambda with tqdm.tqdm or tqdm.notebook.tqdm.
         """
 
-        if X.ndim == 2:
+        if (self.ndim == 3 and X.ndim == 3) or (self.ndim ==2 and X.ndim == 2):
             X = X.reshape(1, *X.shape)
 
-        self.weight_matrix_ = torch.zeros((len(X), self.window_size, self.window_size))
+        self.weight_matrix_ = torch.zeros((len(X), *[self.window_size]*self.ndim))
         self.weight_vector_ = torch.zeros((len(X), self.window_size))
 
         if progress is None:
@@ -100,12 +104,13 @@ class ConvAR:
         else:
             iterable = progress(range(len(X)))
 
-        self.model = ConvARBase(self.radius, weight_matrix=self._init_weight_matrix)
+        self.model = ConvARBase(self.radius, ndim=self.ndim, weight_matrix=self._init_weight_matrix)
+        radius_slice = [slice(self.radius, -self.radius)] * self.ndim
 
         for i_x in iterable:
 
             # Target values (center of windows)
-            y_ctr = X[i_x, self.radius:-self.radius, self.radius:-self.radius].reshape(-1, 1)
+            y_ctr = X[i_x, *radius_slice].reshape(-1, 1)
 
             # Reset weights
             if i_x != 0:
@@ -171,6 +176,7 @@ class ConvARBase(nn.Module):
     def __init__(
         self,
         radius: int,
+        ndim : Optional[int] = 2,
         weight_vector: Optional[torch.tensor] = None,
         weight_matrix: Optional[torch.tensor] = None,
     ):
@@ -180,16 +186,18 @@ class ConvARBase(nn.Module):
         radius : int
             Size of window from the center pixel, excluding the center pixel.
             Windows length is (2 * radius) + 1
-        weight_vector : 1d tensor
-            Inital weights. Theses will be mapped into weight_matrix,
-            e.g. for a 3x3 window:
-                weight_vector = torch.tensor([w0, w])
+        ndim : int, optional, default: 2
+            Dimensionality of input. 2 for images. 3 for volumetric.
+        weight_vector : 1d or 2d tensor
+            Inital weights. 1d if input is 2d. 2d if input is in 3d.
+            Theses will be mapped into weight_matrix, e.g. for a 3x3 window:
+                weight_vector = torch.tensor([w0, w1])
                 weight_matix = torch.tensor([
                     [w1, w0, w1],
                     [w0,  0, w0],
                     [w1, w0, w1]
                 ])
-        weight_matrix : 2d tensor
+        weight_matrix : 1d or 2d tensor
             Inital weights. Theses will be mapped into weight_vector.
             This matrix should be symmetric with zero in the middle.
                 weight_matix = torch.tensor([
@@ -200,18 +208,23 @@ class ConvARBase(nn.Module):
         """
         super().__init__()
 
+        # Set forward func
+        self.ndim = ndim
+
+        if self.ndim == 2:
+            self.conv = torch.conv2d
+        else:
+            self.conv = torch.conv3d
+
         # Compute distances from center
         self.radius = radius
         self.window_size = int(2 * radius + 1)
 
-        # A faster algorithm for this exists
-        self.distances = torch.hypot(
-            *torch.meshgrid(
-                torch.arange(self.window_size) - ((self.window_size - 1) / 2),
-                torch.arange(self.window_size) - ((self.window_size - 1) / 2),
-                indexing="ij"
-            )
-        )
+        shape = tuple(self.window_size for _ in range(ndim))
+        center = torch.tensor(shape) // 2
+        indices = torch.meshgrid([torch.arange(size) for size in shape], indexing="ij")
+        indices = torch.stack(indices, dim=-1).float()
+        self.distances = torch.linalg.norm(indices - center, dim=-1)
 
         # Sort distances from center
         self.unique_distances = torch.unique(self.distances)[1:]
@@ -226,7 +239,7 @@ class ConvARBase(nn.Module):
         # Masks that map to distance group
         #   (e.g. all pixels with distance from center == i)
         self.masks = torch.zeros(
-            (len(self.unique_distances), self.window_size, self.window_size),
+            (len(self.unique_distances), *shape),
             dtype=bool
         )
         for i, d in enumerate(self.unique_distances):
@@ -242,7 +255,7 @@ class ConvARBase(nn.Module):
         self._weight_vector_orig = self.weight_vector.clone()
 
         # Scale weights based on how many pixels map to distance i
-        self.weight_scale = torch.zeros((self.window_size, self.window_size))
+        self.weight_scale = torch.zeros(shape)
         for i in range(self.n_unique):
             # Scale with 1 / number of points at same distance from center of kernel
             self.weight_scale[self.masks[i]] = 1 / self.counts[i]
@@ -251,7 +264,7 @@ class ConvARBase(nn.Module):
         if weight_matrix is not None:
             self.weight_matrix = weight_matrix
         else:
-            self.weight_matrix = torch.zeros((self.window_size, self.window_size))
+            self.weight_matrix = torch.zeros(shape)
             for i in range(self.n_unique):
                 # Matrix of weights (e.g. w mapped to a 2d gaussian kernel)
                 self.weight_matrix[self.masks[i]] = self.weight_vector[i]
@@ -311,7 +324,7 @@ class ConvARBase(nn.Module):
         X : torch.Tensor
             Image.
         """
-        return torch.conv2d(
+        return self.conv(
             X.view(1, 1, *X.shape),
             self.weight_matrix.view(1, 1, *self.weight_matrix.shape) * \
                 self.weight_scale.view(1, 1, *self.weight_scale.shape)
