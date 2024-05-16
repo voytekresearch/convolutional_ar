@@ -28,6 +28,7 @@ class ConvAR:
         loss_thresh: Optional[float] = None,
         optim: Optional[type] = None,
         lr: Optional[float] = 1e-3,
+        lr_scheduler: Optional[type] = None,
         n_epochs: Optional[int] = 1000,
         verbose: Optional[int] = 10,
         init_weight_matrix: Optional[torch.tensor]=None
@@ -49,6 +50,10 @@ class ConvAR:
             Unitialized optimizer, e.g. torch.optim.Adam.
         lr : float, optional, default: 1e-3
             Learning rate.
+        lr_scheduler : type : optional, default: None
+            Function, e.g. torch.optim.lr_scheduler.LinearLR, that accepts an
+            optimizer as input. Additional arguments to the scheduler should be
+            set using a partial or lambda function.
         n_epochs : int, optional, default: 1000
             Number of epochs.
         verbose : int, optional, default: 10
@@ -64,6 +69,7 @@ class ConvAR:
 
         # Optimization
         self.lr = lr
+        self.lr_scheduler = lr_scheduler
         self.n_epochs = n_epochs
 
         self.loss_fn = nn.MSELoss() if loss_fn is None else loss_fn
@@ -93,7 +99,7 @@ class ConvAR:
             Wraps iterations over X, typically a lambda with tqdm.tqdm or tqdm.notebook.tqdm.
         """
 
-        if (self.ndim == 3 and X.ndim == 3) or (self.ndim ==2 and X.ndim == 2):
+        if (self.ndim == 3 and X.ndim == 3) or (self.ndim == 2 and X.ndim == 2):
             X = X.reshape(1, *X.shape)
 
         self.weight_matrix_ = torch.zeros((len(X), *[self.window_size]*self.ndim))
@@ -118,6 +124,8 @@ class ConvAR:
 
             # Initialize optimizer
             optim = self.optim(self.model.parameters(), lr=self.lr)
+            if self.lr_scheduler is not None:
+                scheduler = self.lr_scheduler(optim)
 
             # Descent
             for i_epoch in range(self.n_epochs):
@@ -129,6 +137,9 @@ class ConvAR:
 
                 optim.step()
                 optim.zero_grad()
+
+                if self.lr_scheduler is not None:
+                    scheduler.step()
 
                 # Reporting
                 if self.verbose is None:
