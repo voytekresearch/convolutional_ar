@@ -30,6 +30,7 @@ class ConvAR:
         lr: Optional[float] = 1e-3,
         lr_scheduler: Optional[type] = None,
         n_epochs: Optional[int] = 1000,
+        device=None,
         verbose: Optional[int] = 10,
         init_weight_matrix: Optional[torch.tensor]=None
     ):
@@ -54,6 +55,8 @@ class ConvAR:
             Function, e.g. torch.optim.lr_scheduler.LinearLR, that accepts an
             optimizer as input. Additional arguments to the scheduler should be
             set using a partial or lambda function.
+        device : str, optional, default: None
+            None for cpu. "cuda" or "mps" for gpu.
         n_epochs : int, optional, default: 1000
             Number of epochs.
         verbose : int, optional, default: 10
@@ -76,6 +79,7 @@ class ConvAR:
         self.loss_thresh = -torch.inf if loss_thresh is None else loss_thresh
         self.optim = torch.optim.Adam if optim is None else optim
 
+        self.device = device
         self.verbose = verbose
 
         # Results
@@ -110,7 +114,17 @@ class ConvAR:
         else:
             iterable = progress(range(len(X)))
 
+        if self.device is not None and self._init_weight_matrix is not None:
+            self._init_weight_matrix = self._init_weight_matrix.to(self.device)
+
         self.model = ConvARBase(self.radius, ndim=self.ndim, weight_matrix=self._init_weight_matrix)
+
+        if self.device is not None:
+            X = X.to(self.device)
+            self.model = self.model.to(self.device)
+            self.model.weight_scale = self.model.weight_scale.to(self.device)
+            self.model.weight_matrix = self.model.weight_matrix.to(self.device)
+
         radius_slice = [slice(self.radius, -self.radius)] * self.ndim
 
         for i_x in iterable:
