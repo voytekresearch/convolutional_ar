@@ -83,6 +83,7 @@ class ConvAR:
         self.verbose = verbose
 
         # Results
+        self.model = None
         self._init_weight_matrix = init_weight_matrix
         self.weight_matrix_ = None
         self.weight_vector_ = None
@@ -117,7 +118,10 @@ class ConvAR:
         if self.device is not None and self._init_weight_matrix is not None:
             self._init_weight_matrix = self._init_weight_matrix.to(self.device)
 
-        self.model = ConvARBase(self.radius, ndim=self.ndim, weight_matrix=self._init_weight_matrix)
+        if self.model is None:
+            self.model = ConvARBase(self.radius, ndim=self.ndim, weight_matrix=self._init_weight_matrix)
+        else:
+            self.model.reset_weights()
 
         if self.device is not None:
             X = X.to(self.device)
@@ -194,6 +198,7 @@ class ConvAR:
                 ][0]
 
         self.y_pred = y_pred
+
 
 class ConvARBase(nn.Module):
     """Torch model."""
@@ -272,29 +277,23 @@ class ConvARBase(nn.Module):
             self.masks[i] = mask
 
         # Inital weights
-        if weight_vector == None:
+        if weight_vector is not None and weight_matrix is not None:
+            # Vector and matrix passed
+            raise ValueError("Pass eighter weight_vector or weight_matrix, not both.")
+        elif weight_vector is None and weight_matrix is None:
+            # Neither passed, randomize weights
             self.weight_vector = torch.rand(self.n_unique)
-        else:
+            self.weight_matrix =  vector_to_matrix(self.weight_vector, self.masks)
+        elif weight_vector is not None:
+            # Vector passed
             self.weight_vector = weight_vector
-
-        self._weight_vector_orig = self.weight_vector.clone()
-
-        # Scale weights based on how many pixels map to distance i
-        self.weight_scale = torch.zeros(shape)
-        for i in range(self.n_unique):
-            # Scale with 1 / number of points at same distance from center of kernel
-            self.weight_scale[self.masks[i]] = 1 / self.counts[i]
-
-        # Create a matrix of weights
-        if weight_matrix is not None:
+            self.weight_matrix =  vector_to_matrix(self.weight_vector, self.masks)
+        elif weight_matrix is not None:
+            # Matrix pass
             self.weight_matrix = weight_matrix
-        else:
-            self.weight_matrix = torch.zeros(shape)
-            for i in range(self.n_unique):
-                # Matrix of weights (e.g. w mapped to a 2d gaussian kernel)
-                self.weight_matrix[self.masks[i]] = self.weight_vector[i]
+            self.weight_vector = matrix_to_vector(self.weight_matrix, self.masks, self.n_unique)
 
-        # Make differentiable
+        # Matrix is differentiable
         self.weight_matrix = nn.Parameter(self.weight_matrix)
 
         # Ensure gradients are fixed at equal distances from center
@@ -302,7 +301,16 @@ class ConvARBase(nn.Module):
            lambda grad: self.equalize_grad(grad, self.masks)
         )
 
+        # Store inital state
+        self._weight_vector_orig = self.weight_vector.clone()
         self._weight_matrix_orig = self.weight_matrix.clone()
+
+        # Scale weights based on how many pixels map to distance i
+        self.weight_scale = torch.zeros(shape)
+        for i in range(self.n_unique):
+            # Scale with 1 / number of points at same distance from center of kernel
+            self.weight_scale[self.masks[i]] = 1 / self.counts[i]
+
 
     def reset_weights(self):
         """Reset model weights.
@@ -357,10 +365,22 @@ class ConvARBase(nn.Module):
 
 
 def vector_to_matrix(weight_vector, masks):
-
+    """Convert weights from vector to matrix."""
     weight_matrix = torch.zeros(*masks[0].shape)
 
     for i_m in range(len(weight_vector)):
         weight_matrix[masks[i_m]] = weight_vector[i_m]
 
     return weight_matrix
+
+
+def matrix_to_vector(weight_matrix, masks, n_unique):
+    """Convert weights frmo matrix to vector."""
+    weight_vector = torch.zeros(n_unique)
+
+    for i_m in range(n_unique):
+        weight_vector[i_m] = weight_matrix[
+            masks[i_m]
+        ][0]
+
+    return weight_vector
