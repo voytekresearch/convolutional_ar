@@ -84,7 +84,10 @@ class ConvAR:
 
         # Results
         self.model = None
-        self._init_weight_matrix = init_weight_matrix
+        if init_weight_matrix is not None:
+            self._init_weight_matrix = init_weight_matrix.clone()
+        else:
+            self._init_weight_matrix = None
         self.weight_matrix_ = None
         self.weight_vector_ = None
 
@@ -286,12 +289,12 @@ class ConvARBase(nn.Module):
             self.weight_matrix =  vector_to_matrix(self.weight_vector, self.masks)
         elif weight_vector is not None:
             # Vector passed
-            self.weight_vector = weight_vector
-            self.weight_matrix =  vector_to_matrix(self.weight_vector, self.masks)
+            self.weight_vector = weight_vector.clone()
+            self.weight_matrix =  vector_to_matrix(self.weight_vector.clone(), self.masks)
         elif weight_matrix is not None:
             # Matrix pass
-            self.weight_matrix = weight_matrix
-            self.weight_vector = matrix_to_vector(self.weight_matrix, self.masks, self.n_unique)
+            self.weight_matrix = weight_matrix.clone()
+            self.weight_vector = matrix_to_vector(self.weight_matrix.clone(), self.masks, self.n_unique)
 
         # Matrix is differentiable
         self.weight_matrix = nn.Parameter(self.weight_matrix)
