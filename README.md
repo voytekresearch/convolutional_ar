@@ -16,11 +16,9 @@ Kylberg textures. Examples of each class:
 
 ![kylberg](https://github.com/voytekresearch/convolutional_ar/blob/3443b828577c830e4c27d640cc0981f6310c489f/docs/example_x.png)
 
-CUReT.
+![CUReT](https://www.cs.columbia.edu/CAVE/software/curet/html/sample.html).
 
-kth-tips-2b
-
-
+![kth-tips-2b](https://www.csc.kth.se/cvap/databases/kth-tips/index.html).
 
 ## Results
 
