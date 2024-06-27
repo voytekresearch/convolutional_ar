@@ -14,7 +14,7 @@ class ConvAR:
 
     Attributes
     ----------
-    weight_matrix_ : 3d tensor
+    weight_matrix_ : 2d or 3d tensor
         Learned weights in matrix form (e.g. with duplicates).
     weight_vector_ : 2d tensor
         Learned weights as the unique of the weight matrix, sorted by distance.
@@ -23,11 +23,14 @@ class ConvAR:
     def __init__(
         self,
         radius: int,
+        ndim: Optional[int] = 2,
         loss_fn: Optional[Callable] = None,
         loss_thresh: Optional[float] = None,
         optim: Optional[type] = None,
         lr: Optional[float] = 1e-3,
+        lr_scheduler: Optional[type] = None,
         n_epochs: Optional[int] = 1000,
+        device=None,
         verbose: Optional[int] = 10,
         init_weight_matrix: Optional[torch.tensor]=None
     ):
@@ -38,6 +41,8 @@ class ConvAR:
         radius : int
             Size of window from the center pixel, excluding the center pixel.
             Windows length is (2 * radius) + 1
+        ndim : int, optional, default: 2
+            Dimensionality of input. 2 for images. 3 for volumetric.
         loss_fn : func, optional, default: None
             Loss function, e.g. torch.nn.MSELoss().
         loss_thresh : float, optional, default: None
@@ -46,6 +51,12 @@ class ConvAR:
             Unitialized optimizer, e.g. torch.optim.Adam.
         lr : float, optional, default: 1e-3
             Learning rate.
+        lr_scheduler : type : optional, default: None
+            Function, e.g. torch.optim.lr_scheduler.LinearLR, that accepts an
+            optimizer as input. Additional arguments to the scheduler should be
+            set using a partial or lambda function.
+        device : str, optional, default: None
+            None for cpu. "cuda" or "mps" for gpu.
         n_epochs : int, optional, default: 1000
             Number of epochs.
         verbose : int, optional, default: 10
@@ -55,21 +66,28 @@ class ConvAR:
         """
         # Window
         self.radius = radius
+        self.ndim = ndim
         self.window_size = int(2 * radius + 1)
         self.ctr = (self.window_size - 1) // 2
 
         # Optimization
         self.lr = lr
+        self.lr_scheduler = lr_scheduler
         self.n_epochs = n_epochs
 
         self.loss_fn = nn.MSELoss() if loss_fn is None else loss_fn
         self.loss_thresh = -torch.inf if loss_thresh is None else loss_thresh
         self.optim = torch.optim.Adam if optim is None else optim
 
+        self.device = device
         self.verbose = verbose
 
         # Results
-        self._init_weight_matrix = init_weight_matrix
+        self.model = None
+        if init_weight_matrix is not None:
+            self._init_weight_matrix = init_weight_matrix.clone()
+        else:
+            self._init_weight_matrix = None
         self.weight_matrix_ = None
         self.weight_vector_ = None
 
@@ -82,17 +100,17 @@ class ConvAR:
 
         Parameters
         ----------
-        X : 2d or 3d tensor
+        X : 3d or 4d tensor
             Greyscale image data. Should have shape of either:
-            (n_observations, pixel_rows, pixel_columns) or (pixel_rows, pixel_columns)
+            (n_observations, voxels_i, voxels_j, voxels_k) or (voxels_i, voxels_j, voxels_k)
         progress : func
             Wraps iterations over X, typically a lambda with tqdm.tqdm or tqdm.notebook.tqdm.
         """
 
-        if X.ndim == 2:
+        if (self.ndim == 3 and X.ndim == 3) or (self.ndim == 2 and X.ndim == 2):
             X = X.reshape(1, *X.shape)
 
-        self.weight_matrix_ = torch.zeros((len(X), self.window_size, self.window_size))
+        self.weight_matrix_ = torch.zeros((len(X), *[self.window_size]*self.ndim))
         self.weight_vector_ = torch.zeros((len(X), self.window_size))
 
         if progress is None:
@@ -100,12 +118,26 @@ class ConvAR:
         else:
             iterable = progress(range(len(X)))
 
-        self.model = ConvARBase(self.radius, weight_matrix=self._init_weight_matrix)
+        if self.device is not None and self._init_weight_matrix is not None:
+            self._init_weight_matrix = self._init_weight_matrix.to(self.device)
+
+        if self.model is None:
+            self.model = ConvARBase(self.radius, ndim=self.ndim, weight_matrix=self._init_weight_matrix)
+        else:
+            self.model.reset_weights()
+
+        if self.device is not None:
+            X = X.to(self.device)
+            self.model = self.model.to(self.device)
+            self.model.weight_scale = self.model.weight_scale.to(self.device)
+            self.model.weight_matrix = self.model.weight_matrix.to(self.device)
+
+        radius_slice = [slice(self.radius, -self.radius)] * self.ndim
 
         for i_x in iterable:
 
             # Target values (center of windows)
-            y_ctr = X[i_x, self.radius:-self.radius, self.radius:-self.radius].reshape(-1, 1)
+            y_ctr = X[i_x, *radius_slice].reshape(-1, 1)
 
             # Reset weights
             if i_x != 0:
@@ -113,6 +145,8 @@ class ConvAR:
 
             # Initialize optimizer
             optim = self.optim(self.model.parameters(), lr=self.lr)
+            if self.lr_scheduler is not None:
+                scheduler = self.lr_scheduler(optim)
 
             # Descent
             for i_epoch in range(self.n_epochs):
@@ -124,6 +158,9 @@ class ConvAR:
 
                 optim.step()
                 optim.zero_grad()
+
+                if self.lr_scheduler is not None:
+                    scheduler.step()
 
                 # Reporting
                 if self.verbose is None:
@@ -165,12 +202,14 @@ class ConvAR:
 
         self.y_pred = y_pred
 
+
 class ConvARBase(nn.Module):
     """Torch model."""
 
     def __init__(
         self,
         radius: int,
+        ndim : Optional[int] = 2,
         weight_vector: Optional[torch.tensor] = None,
         weight_matrix: Optional[torch.tensor] = None,
     ):
@@ -180,16 +219,18 @@ class ConvARBase(nn.Module):
         radius : int
             Size of window from the center pixel, excluding the center pixel.
             Windows length is (2 * radius) + 1
-        weight_vector : 1d tensor
-            Inital weights. Theses will be mapped into weight_matrix,
-            e.g. for a 3x3 window:
-                weight_vector = torch.tensor([w0, w])
+        ndim : int, optional, default: 2
+            Dimensionality of input. 2 for images. 3 for volumetric.
+        weight_vector : 1d or 2d tensor
+            Inital weights. 1d if input is 2d. 2d if input is in 3d.
+            Theses will be mapped into weight_matrix, e.g. for a 3x3 window:
+                weight_vector = torch.tensor([w0, w1])
                 weight_matix = torch.tensor([
                     [w1, w0, w1],
                     [w0,  0, w0],
                     [w1, w0, w1]
                 ])
-        weight_matrix : 2d tensor
+        weight_matrix : 1d or 2d tensor
             Inital weights. Theses will be mapped into weight_vector.
             This matrix should be symmetric with zero in the middle.
                 weight_matix = torch.tensor([
@@ -200,18 +241,23 @@ class ConvARBase(nn.Module):
         """
         super().__init__()
 
+        # Set forward func
+        self.ndim = ndim
+
+        if self.ndim == 2:
+            self.conv = torch.conv2d
+        else:
+            self.conv = torch.conv3d
+
         # Compute distances from center
         self.radius = radius
         self.window_size = int(2 * radius + 1)
 
-        # A faster algorithm for this exists
-        self.distances = torch.hypot(
-            *torch.meshgrid(
-                torch.arange(self.window_size) - ((self.window_size - 1) / 2),
-                torch.arange(self.window_size) - ((self.window_size - 1) / 2),
-                indexing="ij"
-            )
-        )
+        shape = tuple(self.window_size for _ in range(ndim))
+        center = torch.tensor(shape) // 2
+        indices = torch.meshgrid([torch.arange(size) for size in shape], indexing="ij")
+        indices = torch.stack(indices, dim=-1).float()
+        self.distances = torch.linalg.norm(indices - center, dim=-1)
 
         # Sort distances from center
         self.unique_distances = torch.unique(self.distances)[1:]
@@ -226,7 +272,7 @@ class ConvARBase(nn.Module):
         # Masks that map to distance group
         #   (e.g. all pixels with distance from center == i)
         self.masks = torch.zeros(
-            (len(self.unique_distances), self.window_size, self.window_size),
+            (len(self.unique_distances), *shape),
             dtype=bool
         )
         for i, d in enumerate(self.unique_distances):
@@ -234,29 +280,23 @@ class ConvARBase(nn.Module):
             self.masks[i] = mask
 
         # Inital weights
-        if weight_vector == None:
+        if weight_vector is not None and weight_matrix is not None:
+            # Vector and matrix passed
+            raise ValueError("Pass eighter weight_vector or weight_matrix, not both.")
+        elif weight_vector is None and weight_matrix is None:
+            # Neither passed, randomize weights
             self.weight_vector = torch.rand(self.n_unique)
-        else:
-            self.weight_vector = weight_vector
+            self.weight_matrix =  vector_to_matrix(self.weight_vector, self.masks)
+        elif weight_vector is not None:
+            # Vector passed
+            self.weight_vector = weight_vector.clone()
+            self.weight_matrix =  vector_to_matrix(self.weight_vector.clone(), self.masks)
+        elif weight_matrix is not None:
+            # Matrix pass
+            self.weight_matrix = weight_matrix.clone()
+            self.weight_vector = matrix_to_vector(self.weight_matrix.clone(), self.masks, self.n_unique)
 
-        self._weight_vector_orig = self.weight_vector.clone()
-
-        # Scale weights based on how many pixels map to distance i
-        self.weight_scale = torch.zeros((self.window_size, self.window_size))
-        for i in range(self.n_unique):
-            # Scale with 1 / number of points at same distance from center of kernel
-            self.weight_scale[self.masks[i]] = 1 / self.counts[i]
-
-        # Create a matrix of weights
-        if weight_matrix is not None:
-            self.weight_matrix = weight_matrix
-        else:
-            self.weight_matrix = torch.zeros((self.window_size, self.window_size))
-            for i in range(self.n_unique):
-                # Matrix of weights (e.g. w mapped to a 2d gaussian kernel)
-                self.weight_matrix[self.masks[i]] = self.weight_vector[i]
-
-        # Make differentiable
+        # Matrix is differentiable
         self.weight_matrix = nn.Parameter(self.weight_matrix)
 
         # Ensure gradients are fixed at equal distances from center
@@ -264,7 +304,16 @@ class ConvARBase(nn.Module):
            lambda grad: self.equalize_grad(grad, self.masks)
         )
 
+        # Store inital state
+        self._weight_vector_orig = self.weight_vector.clone()
         self._weight_matrix_orig = self.weight_matrix.clone()
+
+        # Scale weights based on how many pixels map to distance i
+        self.weight_scale = torch.zeros(shape)
+        for i in range(self.n_unique):
+            # Scale with 1 / number of points at same distance from center of kernel
+            self.weight_scale[self.masks[i]] = 1 / self.counts[i]
+
 
     def reset_weights(self):
         """Reset model weights.
@@ -311,7 +360,7 @@ class ConvARBase(nn.Module):
         X : torch.Tensor
             Image.
         """
-        return torch.conv2d(
+        return self.conv(
             X.view(1, 1, *X.shape),
             self.weight_matrix.view(1, 1, *self.weight_matrix.shape) * \
                 self.weight_scale.view(1, 1, *self.weight_scale.shape)
@@ -319,10 +368,22 @@ class ConvARBase(nn.Module):
 
 
 def vector_to_matrix(weight_vector, masks):
-
+    """Convert weights from vector to matrix."""
     weight_matrix = torch.zeros(*masks[0].shape)
 
     for i_m in range(len(weight_vector)):
         weight_matrix[masks[i_m]] = weight_vector[i_m]
 
     return weight_matrix
+
+
+def matrix_to_vector(weight_matrix, masks, n_unique):
+    """Convert weights frmo matrix to vector."""
+    weight_vector = torch.zeros(n_unique)
+
+    for i_m in range(n_unique):
+        weight_vector[i_m] = weight_matrix[
+            masks[i_m]
+        ][0]
+
+    return weight_vector
