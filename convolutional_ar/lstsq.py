@@ -83,18 +83,21 @@ class ConvAR:
         if X.ndim == 2:
             X = X.unsqueeze(0)
 
+        if self.equidistant:
+            self.weights = torch.zeros((len(X), int(self.window_size*self.window_size)-1))
+        else:
+            self.weights = torch.zeros((len(X), self.n_unique))
+
         for i in range(len(X)):
 
             X_windowed = extract_windows(X[i], self.window_size, self.stride, self.dilation)
 
             if not self.equidistant:
-                self.weights = torch.zeros((len(X), int(self.window_size*self.window_size)-1))
                 Xw = X_windowed[:, self.mask]
                 yw = X_windowed[:, ~self.mask]
                 w, _, _, _ = torch.linalg.lstsq(Xw, yw)
                 self.weights[i] = w[:, 0]
             else:
-                self.weights = torch.zeros((len(X), self.n_unique))
                 Xw = torch.zeros((len(X_windowed), self.n_unique))
                 yw = torch.zeros(len(X_windowed))
                 for i_dist in range(self.n_unique):
