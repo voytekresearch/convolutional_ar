@@ -4,11 +4,11 @@
 
 <img src="https://raw.githubusercontent.com/ryanhammonds/explorations/master/docs/convolution.png" width="500" style="width: 50%; display: block; margin-left: auto; margin-right: auto;"/>
 
-The weights of a convolution kernel are optimized to best predict the center pixel of each window, $\mathbf{X}_i$. The weights of the kernel (Fig. 2b) are linked based on distance from the center, e.g. the first three weights, $\{w_0, w_1, w_2\}$, correspond to indices in the kernel with distances $\{1, \sqrt{2}, 2\}$ from the center pixel. Convolution is the Frobenius inner product between the image and kernel, optimized to best predict the center pixel, $c_i \in \mathbf{X}$.
+The weights of a convolution kernel are optimized to best predict the center pixel of each window, $\mathbf{X}_i$. The weights of the kernel are constrained based on distance from the center, e.g. the first three weights, $\{w_0, w_1, w_2\}$, correspond to indices in the kernel with distances $\{1, \sqrt{2}, 2\}$ from the center pixel. Convolution is the Frobenius inner product between the image and kernel, optimized to best predict the center pixel, $c_i \in \mathbf{X}$.
 
 <img src="https://raw.githubusercontent.com/ryanhammonds/explorations/master/docs/decimation.png" width="600" style="width: 50%; display: block; margin-left: auto; margin-right: auto;"/>
 
-Multiple convolution kernels are learned to account for various spatial scales in image. This is performed by decimating the image by various factors using the same kernel size, resulting in the kernel expanding by the decimation factor. The above image demonstrates this. Decimating the image by a factor of two results in the kernel expanding as shown in c.
+Multiple convolution kernels are learned to account for various spatial scales in image. This is learned by dialating the kernel.
 
 ## Datasets
 
