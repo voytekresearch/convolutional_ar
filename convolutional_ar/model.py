@@ -171,15 +171,15 @@ class ConvAR:
                 ):
                     # Print progress
                     sys.stdout.write(
-                        f"\rmodel {i_x}, epoch {i_epoch}, loss {float(loss)}"
+                        f"\rmodel {i_x}, epoch {i_epoch}, loss {float(loss.detach())}"
                     )
                     sys.stdout.flush()
 
-                if float(loss) < self.loss_thresh:
+                if float(loss.detach()) < self.loss_thresh:
                     # Exit loop when loss is below threshold after n iterations
                     if self.verbose is not None:
                         sys.stdout.write(
-                            f"\rmodel {i_x}, epoch {i_epoch}, loss {float(loss)}"
+                            f"\rmodel {i_x}, epoch {i_epoch}, loss {float(loss.detach())}"
                         )
                         print("")
                     break
