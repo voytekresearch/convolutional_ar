@@ -4,7 +4,8 @@ import time
 import os
 import hashlib
 from pathlib import Path
-
+import re
+import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -887,15 +888,15 @@ def build_dataset(x_files, y_files, max_open_files, zscore_x, label_lut):
     )
 
 ## TODO: refactor to train.py
-def batch_loss_on_windows(xb, yb, patch_chunk_size, requested_window, requested_stride):
+def batch_loss_on_windows(model, xb, yb, patch_chunk_size, requested_window, requested_stride, patch_size=PATCH_SIZE):
     # xb: [B, D, H, W], yb: [B, D, H, W]
     x5 = xb.unsqueeze(1).float()  # [B,1,D,H,W]
     spatial_shape = tuple(int(v) for v in x5.shape[2:])
-    ensure_divisible(spatial_shape, PATCH_SIZE)
+    ensure_divisible(spatial_shape, patch_size)
 
-    win = fit_window_to_shape(spatial_shape, requested_window, PATCH_SIZE)
+    win = fit_window_to_shape(spatial_shape, requested_window, patch_size)
     stride_in = requested_stride if requested_stride is not None else win
-    stride = fit_window_to_shape(spatial_shape, stride_in, PATCH_SIZE)
+    stride = fit_window_to_shape(spatial_shape, stride_in, patch_size)
     stride = tuple(min(s, w) for s, w in zip(stride, win))
 
     slices = make_window_slices(spatial_shape, win, stride)
@@ -909,9 +910,23 @@ def batch_loss_on_windows(xb, yb, patch_chunk_size, requested_window, requested_
     return total / max(1, len(slices))
 
 ## TODO: refactor to train.py
-def train_step_adaptive(x_cpu, y_cpu):
-    # Returns: (loss_num, loss_den, hit_oom)
-    global runtime_micro_bs, runtime_patch_chunk, runtime_window
+def train_step_adaptive(
+    model,
+    optimizer,
+    scaler,
+    x_cpu,
+    y_cpu,
+    runtime_micro_bs,
+    runtime_patch_chunk,
+    runtime_window,
+    runtime_stride,
+    amp_dtype,
+    use_amp,
+    grad_clip_norm,
+    device=DEVICE,
+    patch_size=PATCH_SIZE,
+):
+    # Returns: (loss_num, loss_den, hit_oom, runtime_micro_bs, runtime_patch_chunk, runtime_window)
     hit_oom = False
 
     total_voxels = int(y_cpu.numel())
@@ -921,17 +936,19 @@ def train_step_adaptive(x_cpu, y_cpu):
 
         try:
             for s in range(0, x_cpu.size(0), runtime_micro_bs):
-                xb = x_cpu[s : s + runtime_micro_bs].to(DEVICE, non_blocking=True)
-                yb = y_cpu[s : s + runtime_micro_bs].to(DEVICE, non_blocking=True)
+                xb = x_cpu[s : s + runtime_micro_bs].to(device, non_blocking=True)
+                yb = y_cpu[s : s + runtime_micro_bs].to(device, non_blocking=True)
 
                 weight = float(yb.numel()) / float(total_voxels)
                 with torch.autocast(device_type="cuda", dtype=amp_dtype, enabled=use_amp):
                     loss_micro = batch_loss_on_windows(
-                        xb,
-                        yb,
+                        model=model,
+                        xb=xb,
+                        yb=yb,
                         patch_chunk_size=runtime_patch_chunk,
                         requested_window=runtime_window,
                         requested_stride=runtime_stride,
+                        patch_size=patch_size,
                     )
                     loss_scaled = loss_micro * weight
 
@@ -942,7 +959,7 @@ def train_step_adaptive(x_cpu, y_cpu):
 
                 batch_num += float(loss_micro.detach().item()) * int(yb.numel())
 
-            clip_norm = float(TRAIN_CFG["grad_clip_norm"])
+            clip_norm = float(grad_clip_norm)
             if clip_norm > 0:
                 if scaler.is_enabled():
                     scaler.unscale_(optimizer)
@@ -954,14 +971,14 @@ def train_step_adaptive(x_cpu, y_cpu):
             else:
                 optimizer.step()
 
-            return batch_num, total_voxels, hit_oom
+            return batch_num, total_voxels, hit_oom, runtime_micro_bs, runtime_patch_chunk, runtime_window
 
         except RuntimeError as e:
             if "out of memory" not in str(e).lower():
                 raise
 
             hit_oom = True
-            if DEVICE == "cuda":
+            if device == "cuda":
                 torch.cuda.empty_cache()
 
             if runtime_micro_bs > 1:
@@ -972,8 +989,8 @@ def train_step_adaptive(x_cpu, y_cpu):
                 print(f"[OOM] patch_chunk_size -> {runtime_patch_chunk}")
             else:
                 if runtime_window is None:
-                    runtime_window = fit_window_to_shape(tuple(int(v) for v in x_cpu.shape[1:]), x_cpu.shape[1:], PATCH_SIZE)
-                new_window = halve_window_shape(runtime_window, PATCH_SIZE)
+                    runtime_window = fit_window_to_shape(tuple(int(v) for v in x_cpu.shape[1:]), x_cpu.shape[1:], patch_size)
+                new_window = halve_window_shape(runtime_window, patch_size)
                 if new_window == runtime_window:
                     raise RuntimeError("OOM at minimum micro-batch/patch-chunk/window settings") from e
                 runtime_window = new_window
@@ -981,7 +998,20 @@ def train_step_adaptive(x_cpu, y_cpu):
 
 ## TODO: refactor to train.py
 @torch.no_grad()
-def evaluate(model, loader, max_batches=None, desc="val"):
+def evaluate(
+    model,
+    loader,
+    runtime_micro_bs,
+    runtime_patch_chunk,
+    runtime_window,
+    runtime_stride,
+    amp_dtype,
+    use_amp,
+    max_batches=None,
+    desc="val",
+    device=DEVICE,
+    patch_size=PATCH_SIZE,
+):
     model.eval()
     total_num = 0.0
     total_den = 0
@@ -995,16 +1025,18 @@ def evaluate(model, loader, max_batches=None, desc="val"):
 
         batch_num = 0.0
         for s in range(0, x_cpu.size(0), runtime_micro_bs):
-            xb = x_cpu[s : s + runtime_micro_bs].to(DEVICE, non_blocking=True)
-            yb = y_cpu[s : s + runtime_micro_bs].to(DEVICE, non_blocking=True)
+            xb = x_cpu[s : s + runtime_micro_bs].to(device, non_blocking=True)
+            yb = y_cpu[s : s + runtime_micro_bs].to(device, non_blocking=True)
 
             with torch.autocast(device_type="cuda", dtype=amp_dtype, enabled=use_amp):
                 loss_micro = batch_loss_on_windows(
-                    xb,
-                    yb,
+                    model=model,
+                    xb=xb,
+                    yb=yb,
                     patch_chunk_size=runtime_patch_chunk,
                     requested_window=runtime_window,
                     requested_stride=runtime_stride,
+                    patch_size=patch_size,
                 )
             batch_num += float(loss_micro.item()) * int(yb.numel())
 
@@ -1022,3 +1054,25 @@ def evaluate(model, loader, max_batches=None, desc="val"):
     pbar.close()
     model.train()
     return total_num / max(1, total_den)
+
+
+## TODO: refactor to data.py
+
+def load_freesurfer_lut(fs_lut_path):
+    pat = re.compile(r"^\s*(\d+)\s+(.+?)\s+(-?\d+)\s+(-?\d+)\s+(-?\d+)\s+(-?\d+)\s*$")
+    rows = []
+    with open(fs_lut_pathpath, "r") as f:
+        for ln in f:
+            ln = ln.strip()
+            if not ln or ln.startswith("#"):
+                continue
+            m = pat.match(ln)
+            if not m:
+                continue
+            fs_id, fs_name, r, g, b, a = m.groups()
+            rows.append({
+                "fs_id": int(fs_id),
+                "fs_name": fs_name,
+                "R": int(r), "G": int(g), "B": int(b), "A": int(a),
+            })
+    return pd.DataFrame(rows)
