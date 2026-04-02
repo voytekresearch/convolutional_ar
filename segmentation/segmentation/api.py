@@ -5,6 +5,7 @@ import torch
 
 from .config import DATA_CFG as DEFAULT_DATA_CFG
 from .config import DEVICE, PATCH_SIZE, SEED, TRAIN_CFG as DEFAULT_TRAIN_CFG
+from .config import MODULE_PATH
 from .data import (
     build_cache_for_pairs,
     build_dataset,
@@ -15,7 +16,6 @@ from .data import (
     make_loader,
     resolve_paths,
     split_pairs_by_group,
-    summarize_group_splits,
 )
 from .utils import ensure_divisible
 from . import data as data_mod
@@ -125,9 +125,6 @@ def prepare_data_pipeline(data_cfg=None, train_cfg=None, seed=SEED, device=DEVIC
                     y_train_files.append(y)
             x_test_files, y_test_files = [], []
 
-    split_root = data_cfg.get("group_split_root", "tensors")
-    summarize_group_splits(x_train_files, x_val_files, x_test_files, root=split_root)
-
     if not x_train_files:
         raise ValueError("Train split is empty")
 
@@ -159,7 +156,7 @@ def prepare_data_pipeline(data_cfg=None, train_cfg=None, seed=SEED, device=DEVIC
     cache_enabled = bool(data_cfg.get("cache_enabled", True))
     cache_rebuild = bool(data_cfg.get("cache_rebuild", False))
     cache_apply_label_lut = bool(data_cfg.get("cache_apply_label_lut", True))
-    cache_dir = Path(data_cfg.get("cache_dir", ".tensor_cache_preproc"))
+    cache_dir = Path(data_cfg.get("cache_dir", MODULE_PATH.parent / ".tensor_cache_preproc"))
 
     cached_built_total = 0
     cached_reused_total = 0

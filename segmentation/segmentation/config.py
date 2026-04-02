@@ -1,6 +1,7 @@
 from copy import deepcopy
 import random
 import torch
+from pathlib import Path
 
 # Repro + device
 SEED = 1337
@@ -13,6 +14,8 @@ if DEVICE == "cuda":
     torch.backends.cudnn.benchmark = True
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
+
+MODULE_PATH = Path(__file__).resolve().parent
 
 PATCH_SIZE = (16, 16, 16)
 
@@ -27,8 +30,9 @@ DATA_CFG = {
     "x_test_files": [],
     "y_test_files": [],
 
-    # Per-group split config (group = tensors/{x}/...)
-    "group_split_enabled": True,
+    # Grouped split config (group = tensors/{x}/...). Disabled by default.
+    # Use explicit x/y val/test lists or set this True when needed.
+    "group_split_enabled": False,
     "group_split_root": "tensors",
     "split_ratios": (0.8, 0.1, 0.1),
     "split_seed": SEED,
@@ -55,7 +59,11 @@ DATA_CFG = {
 
     # Preprocessed cache to remove CPU bottlenecks at train time.
     "cache_enabled": True,
-    "cache_dir": ".tensor_cache_preproc",
+    # Shared repo-level cache (absolute path) so behavior is stable across cwd
+    # and notebooks/scripts reuse the same preprocessed tensors.
+    "cache_dir": str(MODULE_PATH.parent / ".tensor_cache_preproc"),
+    # Shared eval-results cache (pickled metric frames) across runs/checkpoints.
+    "eval_results_cache_dir": str(MODULE_PATH.parent / ".eval_cache" / "test_set" / "results"),
     "cache_rebuild": False,
     "cache_apply_label_lut": True,
     "cache_zscore_x": True,

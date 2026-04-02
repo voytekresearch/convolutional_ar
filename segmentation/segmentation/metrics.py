@@ -14,6 +14,60 @@ from tqdm.auto import tqdm
 from .config import DEVICE
 
 
+def _clean_region_name(value):
+    if pd.isna(value):
+        return None
+    name = str(value).strip()
+    return name if name else None
+
+
+def _region_name_map_from_region_df(class_values, region_df):
+    classes = torch.as_tensor(class_values, dtype=torch.int64).flatten()
+    name_by_y = {}
+
+    if region_df is None or (not isinstance(region_df, pd.DataFrame)) or region_df.empty:
+        return name_by_y
+
+    if "class_idx" in region_df.columns and "region_name" in region_df.columns:
+        for class_idx, region_name in region_df[["class_idx", "region_name"]].itertuples(index=False):
+            if pd.notna(class_idx):
+                name = _clean_region_name(region_name)
+                if name is not None:
+                    name_by_y[int(class_idx)] = name
+
+    if "y" in region_df.columns and "fs_name" in region_df.columns:
+        for y_val, fs_name in region_df[["y", "fs_name"]].itertuples(index=False):
+            if pd.notna(y_val):
+                name = _clean_region_name(fs_name)
+                if name is not None:
+                    name_by_y[int(y_val)] = name
+
+    if "fs_id" in region_df.columns and "fs_name" in region_df.columns:
+        fs_name_by_id = {}
+        for fs_id, fs_name in region_df[["fs_id", "fs_name"]].itertuples(index=False):
+            if pd.notna(fs_id):
+                name = _clean_region_name(fs_name)
+                if name is not None:
+                    fs_name_by_id[int(fs_id)] = name
+
+        for y_val, fs_id in enumerate(classes.tolist()):
+            if y_val <= 0 or int(y_val) in name_by_y:
+                continue
+            name = fs_name_by_id.get(int(fs_id))
+            if name is not None:
+                name_by_y[int(y_val)] = name
+
+    return name_by_y
+
+
+def _region_name_cache_tag(class_values, region_df):
+    name_by_y = _region_name_map_from_region_df(class_values=class_values, region_df=region_df)
+    if not name_by_y:
+        return "none"
+    sig = "|".join(f"{int(y)}={name_by_y[y]}" for y in sorted(name_by_y))
+    return hashlib.sha1(sig.encode("utf-8")).hexdigest()[:16]
+
+
 def _sync_cuda(device=DEVICE):
     if str(device) == "cuda":
         torch.cuda.synchronize()
@@ -396,7 +450,7 @@ def _aggregate_region_metrics_from_confusion(cm_total, method, region_name_by_cl
             {
                 "method": str(method),
                 "class_idx": int(c),
-                "region_name": region_name_by_class.get(int(c)),
+                "region_name": region_name_by_class.get(int(c), f"class_{int(c)}"),
                 "dice": float(dice[c].item()) if torch.isfinite(dice[c]) else np.nan,
                 "vol_true": int(true_vol[c].item()),
                 "vol_pred": int(pred_vol[c].item()),
@@ -500,12 +554,7 @@ def build_tissue_assignment_df(
     n_classes = int(vals.numel())
     y_to_fs = {int(y): int(fs_id) for y, fs_id in enumerate(vals.tolist())}
 
-    name_by_y = {}
-    if region_df is not None and isinstance(region_df, pd.DataFrame):
-        if "y" in region_df.columns and "fs_name" in region_df.columns:
-            for y_val, fs_name in region_df[["y", "fs_name"]].itertuples(index=False):
-                if pd.notna(y_val):
-                    name_by_y[int(y_val)] = str(fs_name)
+    name_by_y = _region_name_map_from_region_df(class_values=vals, region_df=region_df)
 
     # Canonical VBM-like tissue mapping for FreeSurfer IDs.
     csf_ids = {4, 5, 14, 15, 24, 31, 43, 44, 63, 72}
@@ -705,12 +754,7 @@ def collect_test_metrics_fast(
         fg_eval_idx = list(range(1, n_classes))
     fg_eval_idx_t = torch.as_tensor(fg_eval_idx, dtype=torch.int64)
 
-    region_name_by_class = {}
-    if region_df is not None and isinstance(region_df, pd.DataFrame):
-        if "y" in region_df.columns and "fs_name" in region_df.columns:
-            for y_val, fs_name in region_df[["y", "fs_name"]].itertuples(index=False):
-                if pd.notna(y_val):
-                    region_name_by_class[int(y_val)] = str(fs_name)
+    region_name_by_class = _region_name_map_from_region_df(class_values=class_values, region_df=region_df)
 
     sample_rows = []
     timing_rows = []
@@ -926,6 +970,7 @@ def _paths_digest(paths):
 def _default_test_results_cache_name(
     pipeline,
     class_values,
+    region_df,
     max_batches,
     patch_chunk_size,
     compute_boundary,
@@ -942,6 +987,7 @@ def _default_test_results_cache_name(
 ):
     x_files = _test_x_files(pipeline.test_ds)
     data_sig = _paths_digest(x_files)
+    region_sig = _region_name_cache_tag(class_values=class_values, region_df=region_df)
 
     if tissue_ignore_fs_ids is None:
         fs_ign = "default"
@@ -955,6 +1001,7 @@ def _default_test_results_cache_name(
 
     sig = (
         f"test|n={len(x_files)}|d={data_sig}|cls={int(torch.as_tensor(class_values).numel())}"
+        f"|rgn={region_sig}"
         f"|mb={str(max_batches)}|pc={int(patch_chunk_size)}"
         f"|bd={int(bool(compute_boundary))}:{int(boundary_every_n)}:{int(boundary_downsample)}"
         f"|fail={str(failure_metric)}:{str(failure_mode)}:{str(failure_method)}:{str(failure_threshold)}"
@@ -998,6 +1045,7 @@ def collect_test_metrics_fast_cached(
             results_cache_name = _default_test_results_cache_name(
                 pipeline=pipeline,
                 class_values=class_values,
+                region_df=region_df,
                 max_batches=max_batches,
                 patch_chunk_size=patch_chunk_size,
                 compute_boundary=compute_boundary,
@@ -1013,6 +1061,8 @@ def collect_test_metrics_fast_cached(
                 exclude_label_24_from_tissue=exclude_label_24_from_tissue,
             )
         results_cache_path = results_cache_dir / str(results_cache_name)
+
+    cached_region_names = _region_name_map_from_region_df(class_values=class_values, region_df=region_df)
 
     if (
         results_cache_path is not None
@@ -1030,9 +1080,18 @@ def collect_test_metrics_fast_cached(
             failure_samples_df = pd.DataFrame(columns=getattr(sample_metrics_df, "columns", []))
         if failure_region_metrics_df is None:
             failure_region_metrics_df = pd.DataFrame(columns=getattr(region_metrics_df, "columns", []))
-        if return_failure_data:
-            return sample_metrics_df, region_metrics_df, metrics_timing_df, failure_samples_df, failure_region_metrics_df
-        return sample_metrics_df, region_metrics_df, metrics_timing_df
+        region_name_series = region_metrics_df.get("region_name")
+        has_missing_region_names = False
+        if cached_region_names:
+            has_missing_region_names = (
+                region_name_series is None
+                or bool(region_name_series.isna().any())
+                or bool((region_name_series.fillna("").astype(str).str.strip() == "").any())
+            )
+        if not has_missing_region_names:
+            if return_failure_data:
+                return sample_metrics_df, region_metrics_df, metrics_timing_df, failure_samples_df, failure_region_metrics_df
+            return sample_metrics_df, region_metrics_df, metrics_timing_df
 
     out = collect_test_metrics_fast(
         model=model,
@@ -1233,6 +1292,8 @@ def _default_results_cache_name(
     patch_size,
     patch_chunk_size,
     apply_zscore,
+    class_values,
+    region_df,
     n_classes,
     compute_boundary,
     boundary_downsample,
@@ -1241,6 +1302,7 @@ def _default_results_cache_name(
     tissue_drop_true_ignore,
     exclude_label_24_from_tissue,
 ):
+    region_sig = _region_name_cache_tag(class_values=class_values, region_df=region_df)
     if tissue_ignore_fs_ids is None:
         fs_ign = "default"
     else:
@@ -1254,6 +1316,7 @@ def _default_results_cache_name(
     sig = (
         f"root={Path(mgz_root).resolve()}|pairs={expected_valid_pairs}|ps={tuple(int(v) for v in patch_size)}"
         f"|pc={int(patch_chunk_size)}|zs={int(bool(apply_zscore))}|cls={int(n_classes)}"
+        f"|rgn={region_sig}"
         f"|bd={int(bool(compute_boundary))}:{int(boundary_downsample)}"
         f"|tignfs={fs_ign}|tignname={name_ign}|tdrop={int(bool(tissue_drop_true_ignore))}"
         f"|x24={int(bool(exclude_label_24_from_tissue))}"
@@ -1317,6 +1380,8 @@ def evaluate_mgz_throughput_cached(
                 patch_size=patch_size,
                 patch_chunk_size=patch_chunk_size,
                 apply_zscore=apply_zscore,
+                class_values=class_values,
+                region_df=region_df,
                 n_classes=n_classes,
                 compute_boundary=compute_boundary,
                 boundary_downsample=boundary_downsample,
@@ -1329,6 +1394,8 @@ def evaluate_mgz_throughput_cached(
     else:
         results_cache_path = None
 
+    cached_region_names = _region_name_map_from_region_df(class_values=class_values, region_df=region_df)
+
     if (
         results_cache_path is not None
         and bool(reuse_results_cache)
@@ -1336,8 +1403,18 @@ def evaluate_mgz_throughput_cached(
         and results_cache_path.stat().st_size > 0
     ):
         payload = _load_pickle(results_cache_path)
-        payload["throughput_inventory_df"] = inventory_df
-        return payload
+        region_metrics_df = payload.get("throughput_region_metrics_df")
+        region_name_series = None if region_metrics_df is None else region_metrics_df.get("region_name")
+        has_missing_region_names = False
+        if cached_region_names:
+            has_missing_region_names = (
+                region_name_series is None
+                or bool(region_name_series.isna().any())
+                or bool((region_name_series.fillna("").astype(str).str.strip() == "").any())
+            )
+        if not has_missing_region_names:
+            payload["throughput_inventory_df"] = inventory_df
+            return payload
 
     if preprocess_cache_dir is not None:
         cache_index_df, cache_stats_df = build_mgz_preprocess_cache(
@@ -1370,12 +1447,7 @@ def evaluate_mgz_throughput_cached(
             }
         )
 
-    region_name_by_class = {}
-    if region_df is not None and isinstance(region_df, pd.DataFrame):
-        if "y" in region_df.columns and "fs_name" in region_df.columns:
-            for y_val, fs_name in region_df[["y", "fs_name"]].itertuples(index=False):
-                if pd.notna(y_val):
-                    region_name_by_class[int(y_val)] = str(fs_name)
+    region_name_by_class = _region_name_map_from_region_df(class_values=class_values, region_df=region_df)
 
     tissue_class_indices = infer_tissue_class_indices(
         class_values=class_values,

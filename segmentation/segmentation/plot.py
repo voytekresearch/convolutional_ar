@@ -1,10 +1,9 @@
 import matplotlib.pyplot as plt
 import numpy as np
 
-def plot_region_dice(bundle, ax=None):
+def plot_region_dice(bundle, ax=None, ylim=None):
     """Plot per-region Dice scores."""
     region_plot_df = bundle["region_plot_df"]
-
 
     if ax is None:
         fig, ax = plt.subplots(ncols=1, nrows=1, figsize=(12, 24))
@@ -34,7 +33,10 @@ def plot_region_dice(bundle, ax=None):
     #cbar = plt.colorbar(sm, ax=ax, pad=0.01)
     #cbar.set_label("Dice")
     #plt.tight_layout()
-    plt.ylim(-1, 107)
+    if ylim is None:
+        plt.ylim(-1, 107)
+    else:
+        plt.ylim(*ylim)
 
 def plot_tissue_dice(bundle, ax=None):
     """Tissue Dice distribution."""
