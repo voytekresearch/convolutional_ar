@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "segmentation"
+version = "0.1.0"
+description = "3D TransUNet segmentation training and evaluation utilities"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "boto3",
+    "botocore",
+    "matplotlib",
+    "nibabel",
+    "nilearn",
+    "numpy",
+    "pandas",
+    "scipy",
+    "torch",
+    "tqdm",
+]
+
+[project.optional-dependencies]
+notebooks = [
+    "jupyter",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["segmentation*"]
+namespaces = true
