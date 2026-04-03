@@ -155,6 +155,7 @@ def prepare_data_pipeline(data_cfg=None, train_cfg=None, seed=SEED, device=DEVIC
 
     cache_enabled = bool(data_cfg.get("cache_enabled", True))
     cache_rebuild = bool(data_cfg.get("cache_rebuild", False))
+    cache_recheck = bool(data_cfg.get("cache_recheck", False))
     cache_apply_label_lut = bool(data_cfg.get("cache_apply_label_lut", True))
     cache_dir = Path(data_cfg.get("cache_dir", MODULE_PATH.parent / ".tensor_cache_preproc"))
 
@@ -168,6 +169,7 @@ def prepare_data_pipeline(data_cfg=None, train_cfg=None, seed=SEED, device=DEVIC
             cache_dir=cache_dir / "train",
             label_lut=label_lut,
             rebuild=cache_rebuild,
+            recheck=cache_recheck,
         )
         cached_built_total += int(built_train)
         cached_reused_total += int(reused_train)
@@ -179,6 +181,7 @@ def prepare_data_pipeline(data_cfg=None, train_cfg=None, seed=SEED, device=DEVIC
                 cache_dir=cache_dir / "val",
                 label_lut=label_lut,
                 rebuild=cache_rebuild,
+                recheck=cache_recheck,
             )
             cached_built_total += int(built_val)
             cached_reused_total += int(reused_val)
@@ -192,6 +195,7 @@ def prepare_data_pipeline(data_cfg=None, train_cfg=None, seed=SEED, device=DEVIC
                 cache_dir=cache_dir / "test",
                 label_lut=label_lut,
                 rebuild=cache_rebuild,
+                recheck=cache_recheck,
             )
             cached_built_total += int(built_test)
             cached_reused_total += int(reused_test)

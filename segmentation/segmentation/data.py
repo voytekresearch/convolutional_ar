@@ -202,12 +202,26 @@ def dtype_from_name(name):
         raise ValueError(f"Unsupported dtype name: {name}")
     return table[n]
 
-def _cache_paths_for_pair(x_path, y_path, cache_dir, cache_tag):
-    digest = hashlib.sha1(f"{Path(x_path).resolve()}|{Path(y_path).resolve()}|{cache_tag}".encode("utf-8")).hexdigest()[:16]
+def _resolved_pair_id(x_path, y_path):
+    return f"{Path(x_path).resolve()}|{Path(y_path).resolve()}"
+
+def _cache_info_for_pair(x_path, y_path, cache_dir, cache_tag):
+    pair_id = _resolved_pair_id(x_path, y_path)
+    pair_key = hashlib.sha1(pair_id.encode("utf-8")).hexdigest()
+    digest = hashlib.sha1(f"{pair_id}|{cache_tag}".encode("utf-8")).hexdigest()[:16]
     x_name = Path(x_path).stem
     y_name = Path(y_path).stem
-    x_cache = cache_dir / f"{x_name}.{digest}.x.pt"
-    y_cache = cache_dir / f"{y_name}.{digest}.y.pt"
+    x_cache = Path(cache_dir) / f"{x_name}.{digest}.x.pt"
+    y_cache = Path(cache_dir) / f"{y_name}.{digest}.y.pt"
+    return pair_key, x_cache, y_cache
+
+def _cache_paths_for_pair(x_path, y_path, cache_dir, cache_tag):
+    _, x_cache, y_cache = _cache_info_for_pair(
+        x_path,
+        y_path,
+        cache_dir=cache_dir,
+        cache_tag=cache_tag,
+    )
     return x_cache, y_cache
 
 def _save_tensor_atomic(t, out_path):
@@ -217,19 +231,53 @@ def _save_tensor_atomic(t, out_path):
     torch.save(t, tmp)
     os.replace(tmp, out_path)
 
-def build_cache_for_pairs(x_files, y_files, cache_dir, label_lut, rebuild=False):
+def _write_json_atomic(payload, out_path):
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out_path.with_suffix(out_path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=1))
+    os.replace(tmp, out_path)
+
+def _load_json_dict(path):
+    path = Path(path)
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text())
+        if isinstance(payload, dict):
+            return payload
+    except Exception:
+        pass
+    return {}
+
+def _load_cache_request_manifest(path):
+    payload = _load_json_dict(path)
+    requests = payload.get("requests")
+    if payload.get("version") != 1 or not isinstance(requests, dict):
+        return {"version": 1, "requests": {}}
+    return {"version": 1, "requests": requests}
+
+def _cache_request_signature(x_files, y_files, cache_tag):
+    h = hashlib.sha1()
+    h.update(str(cache_tag).encode("utf-8"))
+    h.update(b"\0")
+    for xf, yf in zip(x_files, y_files):
+        h.update(str(xf).encode("utf-8"))
+        h.update(b"\0")
+        h.update(str(yf).encode("utf-8"))
+        h.update(b"\0")
+    return h.hexdigest()
+
+def build_cache_for_pairs(x_files, y_files, cache_dir, label_lut, rebuild=False, recheck=False):
+    if len(x_files) != len(y_files):
+        raise ValueError("x_files and y_files must have same length")
+
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
     skipped_db_path = cache_dir / "_skipped.json"
-    if skipped_db_path.exists():
-        try:
-            skipped_db = json.loads(skipped_db_path.read_text())
-            if not isinstance(skipped_db, dict):
-                skipped_db = {}
-        except Exception:
-            skipped_db = {}
-    else:
-        skipped_db = {}
+    request_manifest_path = cache_dir / "_pair_manifest.json"
+    skipped_db = _load_json_dict(skipped_db_path)
+    request_manifest = _load_cache_request_manifest(request_manifest_path)
 
     cache_x_dtype = dtype_from_name(DATA_CFG.get("cache_x_dtype", "float16"))
     cache_y_dtype = dtype_from_name(DATA_CFG.get("cache_y_dtype", "int16"))
@@ -254,18 +302,30 @@ def build_cache_for_pairs(x_files, y_files, cache_dir, label_lut, rebuild=False)
         f"|map={int(cache_apply_label_lut)}"
         f"|lut={lut_sig}"
     )
+    request_sig = _cache_request_signature(x_files, y_files, cache_tag=cache_tag)
+
+    if (not rebuild) and (not recheck) and (not cache_retry_skipped):
+        request_entry = request_manifest["requests"].get(request_sig)
+        out_x_cached = request_entry.get("out_x") if isinstance(request_entry, dict) else None
+        out_y_cached = request_entry.get("out_y") if isinstance(request_entry, dict) else None
+        skipped_cached = request_entry.get("skipped", 0) if isinstance(request_entry, dict) else 0
+        if isinstance(out_x_cached, list) and isinstance(out_y_cached, list) and len(out_x_cached) == len(out_y_cached):
+            return [str(p) for p in out_x_cached], [str(p) for p in out_y_cached], 0, len(out_x_cached), int(skipped_cached)
 
     out_x, out_y = [], []
     built = 0
     reused = 0
     skipped = 0
 
-    iterator = zip(x_files, y_files)
-    iterator = tqdm(list(iterator), desc="cache build/check", leave=False)
+    iterator = tqdm(zip(x_files, y_files), total=len(x_files), desc="cache build/check", leave=False)
 
     for xf, yf in iterator:
-        x_cache, y_cache = _cache_paths_for_pair(xf, yf, cache_dir=cache_dir, cache_tag=cache_tag)
-        pair_key = hashlib.sha1(f"{Path(xf).resolve()}|{Path(yf).resolve()}".encode("utf-8")).hexdigest()
+        pair_key, x_cache, y_cache = _cache_info_for_pair(
+            xf,
+            yf,
+            cache_dir=cache_dir,
+            cache_tag=cache_tag,
+        )
 
         if (not rebuild) and x_cache.exists() and y_cache.exists():
             out_x.append(str(x_cache))
@@ -343,7 +403,13 @@ def build_cache_for_pairs(x_files, y_files, cache_dir, label_lut, rebuild=False)
         skipped_db.pop(pair_key, None)
         built += 1
 
-    skipped_db_path.write_text(json.dumps(skipped_db, indent=1))
+    request_manifest["requests"][request_sig] = {
+        "out_x": out_x,
+        "out_y": out_y,
+        "skipped": int(skipped),
+    }
+    _write_json_atomic(skipped_db, skipped_db_path)
+    _write_json_atomic(request_manifest, request_manifest_path)
     return out_x, out_y, built, reused, skipped
 
 class LazyTensorPairDataset(Dataset):

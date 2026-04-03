@@ -65,6 +65,9 @@ DATA_CFG = {
     # Shared eval-results cache (pickled metric frames) across runs/checkpoints.
     "eval_results_cache_dir": str(MODULE_PATH.parent / ".eval_cache" / "test_set" / "results"),
     "cache_rebuild": False,
+    # If True, validate manifest entries against the filesystem on startup.
+    # Default False keeps repeat runs fast and trusts the saved pair mapping.
+    "cache_recheck": False,
     "cache_apply_label_lut": True,
     "cache_zscore_x": True,
     "cache_x_dtype": "float16",

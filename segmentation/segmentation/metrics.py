@@ -1,6 +1,8 @@
 import hashlib
 import os
 import pickle
+import re
+from functools import lru_cache
 from pathlib import Path
 from time import perf_counter
 
@@ -11,7 +13,12 @@ import torch.nn.functional as F
 from scipy.ndimage import binary_erosion, distance_transform_edt
 from tqdm.auto import tqdm
 
-from .config import DEVICE
+from .config import DEVICE, MODULE_PATH
+from .data import load_freesurfer_lut
+
+
+_CLASS_PLACEHOLDER_RE = re.compile(r"^class_\d+$")
+_REQUIRED_FS_LUT_PATH = MODULE_PATH.parent / "FreeSurferColorLUT.txt"
 
 
 def _clean_region_name(value):
@@ -20,44 +27,156 @@ def _clean_region_name(value):
     name = str(value).strip()
     return name if name else None
 
+def _is_placeholder_region_name(value):
+    name = _clean_region_name(value)
+    return bool(name is not None and _CLASS_PLACEHOLDER_RE.fullmatch(name))
 
-def _region_name_map_from_region_df(class_values, region_df):
+@lru_cache(maxsize=1)
+def _load_required_freesurfer_region_df():
+    lut_path = Path(_REQUIRED_FS_LUT_PATH)
+    if not lut_path.exists():
+        raise FileNotFoundError(
+            f"Required FreeSurfer LUT not found at {lut_path}. "
+            "Region names must be resolved from FreeSurferColorLUT.txt."
+        )
+
+    region_df = load_freesurfer_lut(lut_path)
+    if region_df.empty:
+        raise ValueError(f"FreeSurfer LUT at {lut_path} did not produce any rows")
+    if "fs_id" not in region_df.columns or "fs_name" not in region_df.columns:
+        raise ValueError(f"FreeSurfer LUT at {lut_path} must contain fs_id and fs_name columns")
+
+    invalid = region_df["fs_name"].map(lambda v: _clean_region_name(v) is None or _is_placeholder_region_name(v))
+    if bool(invalid.any()):
+        bad_ids = region_df.loc[invalid, "fs_id"].astype(int).tolist()[:10]
+        raise ValueError(
+            "FreeSurfer LUT contains invalid region names for fs_id values: "
+            + ", ".join(str(v) for v in bad_ids)
+        )
+
+    return region_df.copy()
+
+def _required_region_name_map(class_values):
     classes = torch.as_tensor(class_values, dtype=torch.int64).flatten()
+    region_df = _load_required_freesurfer_region_df()
+    fs_name_by_id = {
+        int(fs_id): str(fs_name).strip()
+        for fs_id, fs_name in region_df[["fs_id", "fs_name"]].itertuples(index=False)
+        if pd.notna(fs_id) and _clean_region_name(fs_name) is not None and not _is_placeholder_region_name(fs_name)
+    }
+
     name_by_y = {}
+    missing = []
+    for y_val, fs_id in enumerate(classes.tolist()):
+        if int(y_val) <= 0:
+            continue
+        name = fs_name_by_id.get(int(fs_id))
+        if _clean_region_name(name) is None:
+            missing.append((int(y_val), int(fs_id)))
+            continue
+        name_by_y[int(y_val)] = str(name)
 
-    if region_df is None or (not isinstance(region_df, pd.DataFrame)) or region_df.empty:
-        return name_by_y
-
-    if "class_idx" in region_df.columns and "region_name" in region_df.columns:
-        for class_idx, region_name in region_df[["class_idx", "region_name"]].itertuples(index=False):
-            if pd.notna(class_idx):
-                name = _clean_region_name(region_name)
-                if name is not None:
-                    name_by_y[int(class_idx)] = name
-
-    if "y" in region_df.columns and "fs_name" in region_df.columns:
-        for y_val, fs_name in region_df[["y", "fs_name"]].itertuples(index=False):
-            if pd.notna(y_val):
-                name = _clean_region_name(fs_name)
-                if name is not None:
-                    name_by_y[int(y_val)] = name
-
-    if "fs_id" in region_df.columns and "fs_name" in region_df.columns:
-        fs_name_by_id = {}
-        for fs_id, fs_name in region_df[["fs_id", "fs_name"]].itertuples(index=False):
-            if pd.notna(fs_id):
-                name = _clean_region_name(fs_name)
-                if name is not None:
-                    fs_name_by_id[int(fs_id)] = name
-
-        for y_val, fs_id in enumerate(classes.tolist()):
-            if y_val <= 0 or int(y_val) in name_by_y:
-                continue
-            name = fs_name_by_id.get(int(fs_id))
-            if name is not None:
-                name_by_y[int(y_val)] = name
+    if missing:
+        preview = ", ".join(f"class_idx={y}/fs_id={fs_id}" for y, fs_id in missing[:10])
+        raise ValueError(
+            "Could not resolve FreeSurfer region names for all classes from "
+            f"{_REQUIRED_FS_LUT_PATH}. Missing: {preview}"
+        )
 
     return name_by_y
+
+def _region_metrics_df_has_required_names(region_metrics_df, class_values, require_sample_idx=False):
+    if region_metrics_df is None or len(region_metrics_df) == 0:
+        return True
+    if "class_idx" not in region_metrics_df.columns or "region_name" not in region_metrics_df.columns:
+        return False
+    if bool(require_sample_idx):
+        if "sample_idx" not in region_metrics_df.columns:
+            return False
+        if bool(region_metrics_df["sample_idx"].isna().any()):
+            return False
+
+    expected = _required_region_name_map(class_values)
+    present = set()
+    for class_idx, region_name in region_metrics_df[["class_idx", "region_name"]].itertuples(index=False):
+        if pd.isna(class_idx):
+            return False
+        class_idx = int(class_idx)
+        if class_idx <= 0:
+            continue
+        expected_name = expected.get(class_idx)
+        actual_name = _clean_region_name(region_name)
+        if expected_name is None or actual_name != expected_name or _is_placeholder_region_name(actual_name):
+            return False
+        present.add(class_idx)
+    return present.issuperset(expected.keys())
+
+def _assert_region_metrics_df_has_resolved_names(region_metrics_df, context):
+    if region_metrics_df is None or len(region_metrics_df) == 0:
+        return
+    if "region_name" not in region_metrics_df.columns:
+        raise ValueError(f"{context} is missing the region_name column")
+    invalid = region_metrics_df["region_name"].map(lambda v: _clean_region_name(v) is None or _is_placeholder_region_name(v))
+    if bool(invalid.any()):
+        bad = region_metrics_df.loc[invalid, ["class_idx", "region_name"]].head(10).to_dict("records")
+        raise ValueError(
+            f"{context} contains unresolved region names. "
+            "FreeSurferColorLUT.txt must resolve every region. "
+            f"Examples: {bad}"
+        )
+
+def _region_metrics_rows_from_confusion(
+    cm_total,
+    method,
+    region_name_by_class,
+    class_to_fs=None,
+    sample_idx=None,
+    domain=None,
+    x_path=None,
+):
+    cm = cm_total.to(torch.float64)
+    true_vol = cm.sum(dim=1)
+    pred_vol = cm.sum(dim=0)
+    inter = torch.diag(cm)
+    den = true_vol + pred_vol
+
+    dice = torch.full((cm.shape[0],), float("nan"), dtype=torch.float64)
+    valid = den > 0
+    if valid.any():
+        dice[valid] = (2.0 * inter[valid]) / den[valid]
+
+    rows = []
+    for c in range(1, int(cm.shape[0])):
+        region_name = region_name_by_class.get(int(c))
+        if _clean_region_name(region_name) is None or _is_placeholder_region_name(region_name):
+            raise ValueError(
+                f"Missing valid FreeSurfer region name for class_idx={int(c)}. "
+                "Region names must come from FreeSurferColorLUT.txt."
+            )
+
+        row = {
+            "method": str(method),
+            "class_idx": int(c),
+            "region_name": region_name,
+            "dice": float(dice[c].item()) if torch.isfinite(dice[c]) else np.nan,
+            "vol_true": int(true_vol[c].item()),
+            "vol_pred": int(pred_vol[c].item()),
+        }
+        if class_to_fs is not None:
+            row["fs_id"] = int(class_to_fs[int(c)])
+        if sample_idx is not None:
+            row["sample_idx"] = int(sample_idx)
+        if domain is not None:
+            row["domain"] = str(domain)
+        if x_path is not None:
+            row["x_path"] = str(x_path)
+        rows.append(row)
+    return rows
+
+
+def _region_name_map_from_region_df(class_values, region_df):
+    del region_df
+    return _required_region_name_map(class_values)
 
 
 def _region_name_cache_tag(class_values, region_df):
@@ -433,30 +552,11 @@ def _hd95_assd_foreground(pred_fg, true_fg, spacing=(1.0, 1.0, 1.0), downsample=
 
 
 def _aggregate_region_metrics_from_confusion(cm_total, method, region_name_by_class):
-    cm = cm_total.to(torch.float64)
-    true_vol = cm.sum(dim=1)
-    pred_vol = cm.sum(dim=0)
-    inter = torch.diag(cm)
-    den = true_vol + pred_vol
-
-    dice = torch.full((cm.shape[0],), float("nan"), dtype=torch.float64)
-    valid = den > 0
-    if valid.any():
-        dice[valid] = (2.0 * inter[valid]) / den[valid]
-
-    rows = []
-    for c in range(1, int(cm.shape[0])):
-        rows.append(
-            {
-                "method": str(method),
-                "class_idx": int(c),
-                "region_name": region_name_by_class.get(int(c), f"class_{int(c)}"),
-                "dice": float(dice[c].item()) if torch.isfinite(dice[c]) else np.nan,
-                "vol_true": int(true_vol[c].item()),
-                "vol_pred": int(pred_vol[c].item()),
-            }
-        )
-    return rows
+    return _region_metrics_rows_from_confusion(
+        cm_total=cm_total,
+        method=method,
+        region_name_by_class=region_name_by_class,
+    )
 
 
 def _sum_confusions(confusion_by_sample, sample_ids, n_classes):
@@ -725,7 +825,7 @@ def collect_test_metrics_fast(
 
     Speedups vs old cell:
     - Vectorized class stats via confusion matrix (no per-class boolean loops)
-    - Region-wise metrics aggregated once from global confusion matrices
+    - Region-wise metrics emitted once per sample from per-sample confusion matrices
     - Optional sparse/downsampled boundary metric computation
 
     Failure filtering:
@@ -755,13 +855,12 @@ def collect_test_metrics_fast(
     fg_eval_idx_t = torch.as_tensor(fg_eval_idx, dtype=torch.int64)
 
     region_name_by_class = _region_name_map_from_region_df(class_values=class_values, region_df=region_df)
+    class_to_fs = {int(i): int(fs_id) for i, fs_id in enumerate(class_values_i64.tolist())}
 
     sample_rows = []
+    region_rows = []
     timing_rows = []
     sample_idx = 0
-
-    cm_model_by_sample = {}
-    cm_null_by_sample = {}
 
     rng = torch.Generator(device="cpu")
     rng.manual_seed(int(null_seed))
@@ -807,9 +906,6 @@ def collect_test_metrics_fast(
             cm_m, dice_m, vol_true, vol_pred = _class_confusion_and_stats(yt, yp, n_classes)
             cm_n, dice_n, _vol_true_n, vol_null = _class_confusion_and_stats(yt, yn, n_classes)
 
-            cm_model_by_sample[int(sample_idx)] = cm_m
-            cm_null_by_sample[int(sample_idx)] = cm_n
-
             d_model_fg = dice_m.index_select(0, fg_eval_idx_t)
             d_null_fg = dice_n.index_select(0, fg_eval_idx_t)
 
@@ -848,6 +944,26 @@ def collect_test_metrics_fast(
 
             path = x_files[sample_idx] if sample_idx < len(x_files) else "unknown"
             domain = _domain_from_path(path)
+            sample_region_rows_model = _region_metrics_rows_from_confusion(
+                cm_total=cm_m,
+                method="model",
+                region_name_by_class=region_name_by_class,
+                class_to_fs=class_to_fs,
+                sample_idx=sample_idx,
+                domain=domain,
+                x_path=path,
+            )
+            sample_region_rows_null = _region_metrics_rows_from_confusion(
+                cm_total=cm_n,
+                method="null_random",
+                region_name_by_class=region_name_by_class,
+                class_to_fs=class_to_fs,
+                sample_idx=sample_idx,
+                domain=domain,
+                x_path=path,
+            )
+            region_rows.extend(sample_region_rows_model)
+            region_rows.extend(sample_region_rows_null)
 
             sample_rows.append(
                 {
@@ -908,27 +1024,22 @@ def collect_test_metrics_fast(
         sample_metrics_df = sample_metrics_full_df.reset_index(drop=True)
         failure_samples_df = sample_metrics_full_df.iloc[0:0].copy()
 
-    all_sample_ids = sorted(cm_model_by_sample.keys())
-    kept_sample_ids = [sid for sid in all_sample_ids if sid not in failed_sample_ids]
-
-    cm_model_kept = _sum_confusions(cm_model_by_sample, kept_sample_ids, n_classes)
-    cm_null_kept = _sum_confusions(cm_null_by_sample, kept_sample_ids, n_classes)
-
-    region_rows = []
-    region_rows.extend(_aggregate_region_metrics_from_confusion(cm_model_kept, "model", region_name_by_class))
-    region_rows.extend(_aggregate_region_metrics_from_confusion(cm_null_kept, "null_random", region_name_by_class))
-    region_metrics_df = pd.DataFrame(region_rows)
-
+    region_metrics_full_df = pd.DataFrame(region_rows)
     if failed_sample_ids:
-        cm_model_failed = _sum_confusions(cm_model_by_sample, failed_sample_ids, n_classes)
-        cm_null_failed = _sum_confusions(cm_null_by_sample, failed_sample_ids, n_classes)
-
-        failure_region_rows = []
-        failure_region_rows.extend(_aggregate_region_metrics_from_confusion(cm_model_failed, "model", region_name_by_class))
-        failure_region_rows.extend(_aggregate_region_metrics_from_confusion(cm_null_failed, "null_random", region_name_by_class))
-        failure_region_metrics_df = pd.DataFrame(failure_region_rows)
+        region_metrics_df = region_metrics_full_df[~region_metrics_full_df["sample_idx"].isin(failed_sample_ids)].reset_index(drop=True)
+        failure_region_metrics_df = region_metrics_full_df[region_metrics_full_df["sample_idx"].isin(failed_sample_ids)].reset_index(drop=True)
     else:
-        failure_region_metrics_df = pd.DataFrame(columns=["method", "class_idx", "region_name", "dice", "vol_true", "vol_pred"])
+        region_metrics_df = region_metrics_full_df.reset_index(drop=True)
+        failure_region_metrics_df = region_metrics_full_df.iloc[0:0].copy()
+
+    if region_metrics_df.empty:
+        region_metrics_df = pd.DataFrame(
+            columns=["sample_idx", "domain", "x_path", "method", "class_idx", "fs_id", "region_name", "dice", "vol_true", "vol_pred"]
+        )
+    if failure_region_metrics_df.empty:
+        failure_region_metrics_df = pd.DataFrame(
+            columns=["sample_idx", "domain", "x_path", "method", "class_idx", "fs_id", "region_name", "dice", "vol_true", "vol_pred"]
+        )
 
     metrics_timing_df = pd.DataFrame(timing_rows)
 
@@ -1007,6 +1118,7 @@ def _default_test_results_cache_name(
         f"|fail={str(failure_metric)}:{str(failure_mode)}:{str(failure_method)}:{str(failure_threshold)}"
         f"|tignfs={fs_ign}|tignname={name_ign}|tdrop={int(bool(tissue_drop_true_ignore))}"
         f"|x24={int(bool(exclude_label_24_from_tissue))}"
+        f"|rrows=per_sample_v2"
     )
     digest = hashlib.sha1(sig.encode("utf-8")).hexdigest()[:16]
     return f"test_eval_{digest}.pkl"
@@ -1062,7 +1174,7 @@ def collect_test_metrics_fast_cached(
             )
         results_cache_path = results_cache_dir / str(results_cache_name)
 
-    cached_region_names = _region_name_map_from_region_df(class_values=class_values, region_df=region_df)
+    _region_name_map_from_region_df(class_values=class_values, region_df=region_df)
 
     if (
         results_cache_path is not None
@@ -1080,15 +1192,10 @@ def collect_test_metrics_fast_cached(
             failure_samples_df = pd.DataFrame(columns=getattr(sample_metrics_df, "columns", []))
         if failure_region_metrics_df is None:
             failure_region_metrics_df = pd.DataFrame(columns=getattr(region_metrics_df, "columns", []))
-        region_name_series = region_metrics_df.get("region_name")
-        has_missing_region_names = False
-        if cached_region_names:
-            has_missing_region_names = (
-                region_name_series is None
-                or bool(region_name_series.isna().any())
-                or bool((region_name_series.fillna("").astype(str).str.strip() == "").any())
-            )
-        if not has_missing_region_names:
+        if (
+            _region_metrics_df_has_required_names(region_metrics_df, class_values=class_values, require_sample_idx=True)
+            and _region_metrics_df_has_required_names(failure_region_metrics_df, class_values=class_values, require_sample_idx=True)
+        ):
             if return_failure_data:
                 return sample_metrics_df, region_metrics_df, metrics_timing_df, failure_samples_df, failure_region_metrics_df
             return sample_metrics_df, region_metrics_df, metrics_timing_df
@@ -1394,7 +1501,7 @@ def evaluate_mgz_throughput_cached(
     else:
         results_cache_path = None
 
-    cached_region_names = _region_name_map_from_region_df(class_values=class_values, region_df=region_df)
+    _region_name_map_from_region_df(class_values=class_values, region_df=region_df)
 
     if (
         results_cache_path is not None
@@ -1404,15 +1511,7 @@ def evaluate_mgz_throughput_cached(
     ):
         payload = _load_pickle(results_cache_path)
         region_metrics_df = payload.get("throughput_region_metrics_df")
-        region_name_series = None if region_metrics_df is None else region_metrics_df.get("region_name")
-        has_missing_region_names = False
-        if cached_region_names:
-            has_missing_region_names = (
-                region_name_series is None
-                or bool(region_name_series.isna().any())
-                or bool((region_name_series.fillna("").astype(str).str.strip() == "").any())
-            )
-        if not has_missing_region_names:
+        if _region_metrics_df_has_required_names(region_metrics_df, class_values=class_values):
             payload["throughput_inventory_df"] = inventory_df
             return payload
 
@@ -1821,7 +1920,7 @@ def build_eval_dataset_report(
     model_samples = sample_metrics_df[sample_metrics_df["method"] == str(method)].copy()
     sort_metric = str(failure_metric) if str(failure_metric) in model_samples.columns else "mean_dice_fg"
     worst_samples = model_samples.sort_values(sort_metric, ascending=True).head(int(worst_n))
-    bottom_regions = region_metrics_df[region_metrics_df["method"] == str(method)].sort_values("dice", ascending=True).head(int(bottom_regions_n))
+    bottom_regions = plot_bundle["region_plot_df"].head(int(bottom_regions_n)).copy()
 
     failed_unique = 0
     if failure_samples_df is not None and len(failure_samples_df):
@@ -1878,10 +1977,8 @@ def prepare_region_dice_plot_df(
         excl = set(str(x) for x in exclude_region_names)
         kept = kept[~kept["region_name"].isin(excl)].reset_index(drop=True)
 
-    kept["label"] = kept.apply(
-        lambda r: str(r["region_name"]) if pd.notna(r["region_name"]) and str(r["region_name"]).strip() else f"class_{int(r['class_idx'])}",
-        axis=1,
-    )
+    _assert_region_metrics_df_has_resolved_names(kept, context="region_metrics_df")
+    kept["label"] = kept["region_name"].astype(str).str.strip()
 
     kept = kept.sort_values("dice", ascending=True).reset_index(drop=True)
     return kept, sparse, int(sparse_thr)

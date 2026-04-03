@@ -226,3 +226,16 @@ class TransUNet3D(nn.Module):
             pred_patch.append(logit.argmax(dim=-1).cpu())
         pred_patch = torch.cat(pred_patch, dim=1)
         return patches_to_volume(pred_patch, volume_shape=tuple(x.shape[2:]), patch_size=self.patch_size)
+
+    @torch.no_grad()
+    def predict_volume_fast(self, x, patch_chunk_size=96):
+        # Faster inference path that keeps argmax outputs on-device and
+        # preallocates the patch prediction buffer to avoid Python list/cat
+        # overhead. It still returns a volume-shaped tensor for fair timing.
+        feat = self.forward_features(x)
+        patch_feat = self.features_to_patch_features(feat)
+        b, n, v, _ = patch_feat.shape
+        pred_patch = torch.empty((b, n, v), device=patch_feat.device, dtype=torch.int64)
+        for s, e, logit in self._iter_patch_logits(patch_feat, patch_chunk_size=patch_chunk_size):
+            pred_patch[:, s:e] = logit.argmax(dim=-1)
+        return patches_to_volume(pred_patch, volume_shape=tuple(x.shape[2:]), patch_size=self.patch_size)
