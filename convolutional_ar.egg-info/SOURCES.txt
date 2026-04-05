@@ -1,0 +1,12 @@
+README.md
+setup.py
+convolutional_ar/__init__.py
+convolutional_ar/model.py
+convolutional_ar/psd.py
+convolutional_ar/reshape.py
+convolutional_ar/version.py
+convolutional_ar.egg-info/PKG-INFO
+convolutional_ar.egg-info/SOURCES.txt
+convolutional_ar.egg-info/dependency_links.txt
+convolutional_ar.egg-info/requires.txt
+convolutional_ar.egg-info/top_level.txt

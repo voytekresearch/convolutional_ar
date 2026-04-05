@@ -1,0 +1,105 @@
+Metadata-Version: 2.4
+Name: convolutional_ar
+Version: 0.0.1.dev0
+Summary: Convolutional autoregressive models.
+Home-page: https://github.com/voytekresearch/convolutional_ar
+Download-URL: https://github.com/voytekresearch/convolutional_ar/releases
+Author: The Voytek Lab
+Author-email: voyteklab@gmail.com
+Maintainer: Ryan Hammonds
+Maintainer-email: rphammonds@ucsd.edu
+License: Apache License, 2.0
+Keywords: convolutional,autoregressive,image,texture
+Platform: any
+Classifier: Development Status :: 5 - Production/Stable
+Classifier: Intended Audience :: Science/Research
+Classifier: Topic :: Scientific/Engineering
+Classifier: License :: OSI Approved :: Apache Software License
+Classifier: Operating System :: Microsoft :: Windows
+Classifier: Operating System :: MacOS
+Classifier: Operating System :: POSIX
+Classifier: Operating System :: Unix
+Classifier: Programming Language :: Python
+Classifier: Programming Language :: Python :: 3.7
+Classifier: Programming Language :: Python :: 3.8
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Requires-Python: >=3.6
+Requires-Dist: numba==0.58.1
+Requires-Dist: numpy==1.26.2
+Requires-Dist: matplotlib==3.8.2
+Requires-Dist: scikit-learn==1.3.2
+Requires-Dist: scipy==1.11.4
+Requires-Dist: spectrum==0.8.1
+Requires-Dist: torch==2.1.2
+Requires-Dist: torchvision==0.16.2
+Provides-Extra: tests
+Requires-Dist: pytest; extra == "tests"
+Requires-Dist: pytest-cov; extra == "tests"
+Provides-Extra: all
+Requires-Dist: pytest; extra == "all"
+Requires-Dist: pytest-cov; extra == "all"
+Dynamic: author
+Dynamic: author-email
+Dynamic: classifier
+Dynamic: description
+Dynamic: download-url
+Dynamic: home-page
+Dynamic: keywords
+Dynamic: license
+Dynamic: maintainer
+Dynamic: maintainer-email
+Dynamic: platform
+Dynamic: provides-extra
+Dynamic: requires-dist
+Dynamic: requires-python
+Dynamic: summary
+
+# Autoregressive Models for Texture Images
+
+# Convolutional Autoregressive Model
+
+<img src="https://raw.githubusercontent.com/ryanhammonds/explorations/master/docs/convolution.png" width="500" style="width: 50%; display: block; margin-left: auto; margin-right: auto;"/>
+
+The weights of a convolution kernel are optimized to best predict the center pixel of each window, $\mathbf{X}_i$. The weights of the kernel are constrained based on distance from the center, e.g. the first three weights, $\{w_0, w_1, w_2\}$, correspond to indices in the kernel with distances $\{1, \sqrt{2}, 2\}$ from the center pixel. Convolution is the Frobenius inner product between the image and kernel, optimized to best predict the center pixel, $c_i \in \mathbf{X}$.
+
+<img src="https://raw.githubusercontent.com/ryanhammonds/explorations/master/docs/decimation.png" width="600" style="width: 50%; display: block; margin-left: auto; margin-right: auto;"/>
+
+Multiple convolution kernels are learned to account for various spatial scales in image. This is learned by dialating the kernel.
+
+## Datasets
+
+Kylberg textures. Examples of each class:
+
+![kylberg](https://github.com/voytekresearch/convolutional_ar/blob/3443b828577c830e4c27d640cc0981f6310c489f/docs/example_x.png)
+
+![CUReT](https://www.cs.columbia.edu/CAVE/software/curet/html/sample.html).
+
+![kth-tips-2b](https://www.csc.kth.se/cvap/databases/kth-tips/index.html).
+
+## Results
+
+The top row is for the model here. The additional rows (CNNs with millions of parameters) were described
+in Andrearczyk & Whelan, 2016.
+
+
+|                | Kylberg    | CUReT	   | DTD        | kth-tips-2b | ImNet-T	| ImNet-S1| ImNet-S2  | ImageNet |
+|:--------------:|:-----------|:-----------|:-----------|:------------|:--------|:--------|:----------|:---------|
+| ConvAR         | 99.6       | 93.06      |            | 60.36       |         |         |           |          |
+|                |            |            |            |             |         |         |           |          |
+| T-CNN-1 (20.8) | 89.5 ± 1.0 | 97.0 ± 1.0 | 20.6 ± 1.4 | 45.7 ± 1.2  | 42.7    | 34.9    | 42.1      | 13.2     |
+| T-CNN-2 (22.1) | 99.2 ± 0.3 | 98.2 ± 0.6 | 24.6 ± 1.0 | 47.3 ± 2.0  | 62.9    | 59.6    | 70.2      | 39.7     |
+| T-CNN-3 (23.4) | 99.2 ± 0.2 | 98.1 ± 1.0 | 27.8 ± 1.2 | 48.7 ± 1.3  | 71.1    | 69.4    | 78.6      | 51.2     |
+| T-CNN-4 (24.7) | 98.8 ± 0.2 | 97.8 ± 0.9 | 25.4 ± 1.3 | 47.2 ± 1.4  | 71.1    | 69.4    | 76.9      | 28.6     |
+| T-CNN-5 (25.1) | 98.1 ± 0.4 | 97.1 ± 1.2 | 19.1 ± 1.8 | 45.9 ± 1.5  | 65.8    | 54.7    | 72.1      | 24.6     |
+| AlexNet (60.9) | 98.9 ± 0.3 | 98.7 ± 0.6 | 22.7 ± 1.3 | 47.6 ± 1.4  | 66.3    | 65.7    | 73.1      | 57.1     |
+
+
+### Citations
+
+Mao, J., & Jain, A. K. (1992). Texture classification and segmentation using multiresolution simultaneous autoregressive models. Pattern recognition, 25(2), 173-188.
+
+Kylberg, G. (2011). Kylberg texture dataset v. 1.0. Centre for Image Analysis, Swedish University of Agricultural Sciences and Uppsala University.
+
+Andrearczyk, V., & Whelan, P. F. (2016). Using filter banks in Convolutional Neural Networks for texture classification. Pattern Recognition Letters, 84, 63–69. https://doi.org/10.1016/j.patrec.2016.08.016
